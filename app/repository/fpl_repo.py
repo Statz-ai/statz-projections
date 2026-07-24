@@ -32,6 +32,7 @@ async def insert_fpl_projections_async(data_list):
     has_opp = "opponent_id" in df.columns
     has_bonus = "bonus" in df.columns
     has_def_con = "def_con_pct" in df.columns
+    has_xmin = "expected_minutes" in df.columns
 
     def _int_or_none(v):
         if v is None:
@@ -68,6 +69,7 @@ async def insert_fpl_projections_async(data_list):
             row.get("fpl_points"),
             _float_or_none(row.get("bonus")) if has_bonus else None,
             _float_or_none(row.get("def_con_pct")) if has_def_con else None,
+            _float_or_none(row.get("expected_minutes")) if has_xmin else None,
             _int_or_none(row.get("gameweek_id")) if has_gw else None,
             _int_or_none(row.get("team_id")) if has_team else None,
             _int_or_none(row.get("opponent_id")) if has_opp else None,
@@ -78,15 +80,16 @@ async def insert_fpl_projections_async(data_list):
     sql = """
     INSERT INTO fpl_projections (
         fixture_id, player_id, kickoff_datetime, venue, fpl_points,
-        bonus, def_con_pct,
+        bonus, def_con_pct, expected_minutes,
         gameweek_id, team_id, opponent_id,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     AS new
     ON DUPLICATE KEY UPDATE
         fpl_points = new.fpl_points,
         bonus = new.bonus,
         def_con_pct = new.def_con_pct,
+        expected_minutes = new.expected_minutes,
         gameweek_id = new.gameweek_id,
         team_id = new.team_id,
         opponent_id = new.opponent_id,

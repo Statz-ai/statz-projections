@@ -2114,10 +2114,21 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
     fpl_points_df['Team'] = pl_projections['Team'].tolist()
     fpl_points_df['Opponent'] = pl_projections['Opponent'].tolist()
     fpl_points_df['Venue'] = pl_projections['Venue'].tolist()
+    # xMinutes: when the caller stamped xmin_p_play/xmin_p60 (FPL_XMINUTES on),
+    # appearance points and the 60-minute-gated components (clean sheet, goals
+    # conceded, pen saves) stop assuming a 90-minute start. Absent columns ->
+    # both default to 1.0 and the output is identical to pre-xMinutes.
+    _has_xmin = 'xmin_p_play' in pl_projections.columns and 'xmin_p60' in pl_projections.columns
     for i in range(len(pl_projections)):
         fixture_id = pl_projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
         position = pl_projections['FPL Position'][i]
+        if _has_xmin:
+            _p_play = float(pl_projections['xmin_p_play'][i])
+            _p60 = float(pl_projections['xmin_p60'][i])
+        else:
+            _p_play = 1.0
+            _p60 = 1.0
         if position == 'GK':
             fpl_points_dict = fpl_points_dict_gk
         elif position == 'DEF':
@@ -2147,21 +2158,28 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
                         (poisson.pmf(4, goals_conceded) + poisson.pmf(5, goals_conceded)) * 2) + (
                                                 poisson.pmf(6, goals_conceded) + poisson.pmf(7, goals_conceded)) * 3) * \
                                    fpl_points_dict['Goals Conceded'] if goals_conceded > 0 else 0
+            # xMinutes: goals-conceded docks track time on pitch (paired with
+            # the 60' threshold like clean sheets).
+            goal_conceded_points *= _p60
         else:
             goal_conceded_points = 0
         if 'Clean Sheet' in fpl_points_dict:
             clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
                 0] if team in fix_score_pred['Home Team'].values else \
             fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
-            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_points_dict['Clean Sheet']
+            # FPL rule: clean-sheet points require 60+ minutes played.
+            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_points_dict['Clean Sheet'] * _p60
         else:
             clean_sheet_points = 0
         if 'Penalties Saved' in fpl_points_dict:
-            pen_save_points = (0.1 * goals_conceded) * 0.16 * fpl_points_dict['Penalties Saved']
+            pen_save_points = (0.1 * goals_conceded) * 0.16 * fpl_points_dict['Penalties Saved'] * _p60
         else:
             pen_save_points = 0
         cbit_points = pl_projections['CBIT Hit Rate'][i] * 2
-        fpl_points = goal_points + assists + yellow_cards + saves_points + clean_sheet_points + goal_conceded_points + cbit_points + pen_save_points + 2
+        # xMinutes: 2 appearance pts need 60+ minutes; 1 pt for any shorter
+        # appearance. Collapses to the old flat +2 when p_play = p60 = 1.
+        appearance_points = 2 * _p60 + 1 * max(0.0, _p_play - _p60)
+        fpl_points = goal_points + assists + yellow_cards + saves_points + clean_sheet_points + goal_conceded_points + cbit_points + pen_save_points + appearance_points
         fpl_points_df['PTS'].append(fpl_points)
     fpl_points_df = pd.DataFrame(fpl_points_df)
     fpl_points_df.sort_values(by='PTS', ascending=False, inplace=True)
@@ -2183,10 +2201,15 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
     fpl_bonus_df['Team'] = projections['Team'].tolist()
     fpl_bonus_df['Opponent'] = projections['Opponent'].tolist()
     fpl_bonus_df['Venue'] = projections['Venue'].tolist()
+    # xMinutes: the count-shaped columns arrive pre-scaled by exposure on the
+    # FPL-local frame; only the team-derived 60-minute-gated terms (clean
+    # sheet, goals conceded) need explicit p60 weighting here.
+    _has_xmin = 'xmin_p60' in projections.columns
     for i in range(len(projections)):
         fixture_id = projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
         position = projections['FPL Position'][i]
+        _p60 = float(projections['xmin_p60'][i]) if _has_xmin else 1.0
         if position == 'GK':
             fpl_bonus_dict = fpl_bonus_dict_gk
         elif position == 'DEF':
@@ -2221,14 +2244,14 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
                                                                                                             fix_score_pred[
                                                                                                                 'Home Team'].values else \
             fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
-            goal_conceded_points = goals_conceded * fpl_bonus_dict['Goals Conceded'] if goals_conceded > 0 else 0
+            goal_conceded_points = (goals_conceded * fpl_bonus_dict['Goals Conceded'] if goals_conceded > 0 else 0) * _p60
         else:
             goal_conceded_points = 0
         if 'Clean Sheet' in fpl_bonus_dict:
             clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
                 0] if team in fix_score_pred['Home Team'].values else \
             fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
-            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_bonus_dict['Clean Sheet']
+            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_bonus_dict['Clean Sheet'] * _p60
         else:
             clean_sheet_points = 0
         passes = projections['Passes'][i] if projections['Passes'][i] > 0 else 0

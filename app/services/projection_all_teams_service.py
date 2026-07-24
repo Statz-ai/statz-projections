@@ -1477,13 +1477,70 @@ class ProjectionAllTeams:
                         for _col in ['CBIT Hit Rate', 'Clearances Average', 'Blocked Shots Average', 'Interceptions', 'Ball Recovery Average']:
                             if _col not in pl_projections.columns:
                                 pl_projections.loc[:, _col] = 0
-                        fpl_point_df = get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
-                        bps_df = bonus_points_score(pl_projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
+
+                        # ---- xMinutes (mirrors projection_service.py) ----
+                        # FPL-local copy: Opta/FanTeam/Dream11/DraftKings
+                        # below must keep reading unscaled pl_projections.
+                        from app.services.xminutes import (
+                            XMIN_ENABLED as _xmin_enabled,
+                            eligible_past_fixtures, build_minutes_frame,
+                            get_expected_minutes, stamp_xmin_columns,
+                            apply_exposure_scaling,
+                        )
+                        _fpl_frame = pl_projections
+                        if _xmin_enabled:
+                            try:
+                                _t_xm = time.time()
+                                _xm_past_fx = eligible_past_fixtures(fixtures_df, comps)
+                                _xm_minutes = build_minutes_frame(player_stats, _xm_past_fx)
+                                _xm_team_ids = {
+                                    _tn: get_team_id(_tn, teams, league_id, comp_teams)
+                                    for _tn in pl_projections['Team'].unique()
+                                }
+                                _xm_profiles = {}
+                                for _xm_pid, _xm_tname, _xm_pos in pl_projections[
+                                        ['player_id', 'Team', 'FPL Position']
+                                ].drop_duplicates('player_id').itertuples(index=False):
+                                    if pd.isna(_xm_pid):
+                                        continue
+                                    _xm_profiles[int(_xm_pid)] = get_expected_minutes(
+                                        int(_xm_pid), _xm_team_ids.get(_xm_tname),
+                                        _xm_minutes, _xm_past_fx, position=_xm_pos,
+                                    )
+                                _fpl_frame = pl_projections.copy()
+                                _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
+                                                                confirmed_xi=_confirmed_lineups)
+                                _fpl_frame = apply_exposure_scaling(_fpl_frame)
+                                # This path has no team-down CBIT recompute
+                                # (empirical hit rate only) — scale it by
+                                # exposure directly as the minutes discount.
+                                if 'CBIT Hit Rate' in _fpl_frame.columns:
+                                    _fpl_frame['CBIT Hit Rate'] = (
+                                        _fpl_frame['CBIT Hit Rate'] * _fpl_frame['xmin_exposure']
+                                    )
+                                logger.info(f"[{league}] FPL xMinutes: profiles for {len(_xm_profiles)} "
+                                            f"players ({time.time()-_t_xm:.1f}s)")
+                            except Exception as _xm_err:
+                                logger.warning(f"[{league}] FPL xMinutes failed — falling back to "
+                                               f"unscaled points: {_xm_err}", exc_info=True)
+                                _fpl_frame = pl_projections
+
+                        fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
+                        bps_df = bonus_points_score(_fpl_frame, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
                         bonus = get_bonus_points(bps_df, score_preds, expo_factor=0.1)
 
                         fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
                         fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
-                        fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points']].copy()
+                        if 'xmin_expected' in _fpl_frame.columns:
+                            _xm_exp = (
+                                _fpl_frame[['fixture_id', 'player_id', 'xmin_expected']]
+                                .drop_duplicates(['fixture_id', 'player_id'])
+                                .rename(columns={'xmin_expected': 'expected_minutes'})
+                            )
+                            fpl_df = fpl_df.merge(_xm_exp, on=['fixture_id', 'player_id'], how='left')
+                        else:
+                            fpl_df['expected_minutes'] = None
+                        fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points', 'expected_minutes']].copy()
                         _fix_idx = fixtures.set_index('id')
                         _home_id = fpl_df['fixture_id'].map(_fix_idx['home_team_id'])
                         _away_id = fpl_df['fixture_id'].map(_fix_idx['away_team_id'])
