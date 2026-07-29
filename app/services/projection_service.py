@@ -1604,6 +1604,12 @@ class ProjectionService:
             )
         finally:
             release_source_connection(_ll_conn)
+        # Per-90 capture (xmins-methodology §11 Task 1): PL full runs only,
+        # behind FPL_PER90_WRITE (default OFF — zero live effect until
+        # deliberately enabled). Purely additive: shares byte-identical.
+        _per90_collector = (
+            [] if (league_id == 8 and os.getenv("FPL_PER90_WRITE", "0") == "1") else None
+        )
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
@@ -1612,8 +1618,17 @@ class ProjectionService:
                                                                 competition_id=league_id, comp_teams=comp_teams,
                                                                 confirmed_lineups=_confirmed_lineups,
                                                                 odds_for_fixture_players=_odds_for_fixture_players,
-                                                                odds_blend_weight=odds_beta)
+                                                                odds_blend_weight=odds_beta,
+                                                                per90_collector=_per90_collector)
         logger.info(f"[{league}] Player projections computed - {len(pl_projections)} players ({time.time()-_t:.1f}s)")
+        if _per90_collector:
+            from app.repository.fpl_per90_repo import insert_per90_shares_async
+            try:
+                await insert_per90_shares_async(_per90_collector, league_id)
+            except Exception as _p90_err:
+                # Isolated by design — a per-90 write failure must never
+                # damage the live projection run.
+                logger.warning(f"[{league}] per90 share write failed (non-fatal): {_p90_err}")
 
         # Vectorized: build player lookup, merge, derive Position/Saves AND Start? in one pass
         _team_names = teams[['id', 'name']].rename(columns={'id': '_team_id', 'name': 'Team'})

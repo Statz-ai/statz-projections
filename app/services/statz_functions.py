@@ -1658,12 +1658,48 @@ def get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types
 
 # UPDATED - New Parameters: team_id and comps
 def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps, weight, mins=50,
-                                games=None):
+                                games=None, per90_details=None):
+    """per90_details: optional dict — when passed, this function ALSO fills it
+    with the per-90 view of the SAME sample (xmins-methodology.md §11 Task 1):
+        m_bar   — typical start length, Σ(Weight×minutes) ÷ Σ(Weight) over the
+                  exact frame the share used (same xG guard / team-zero drops /
+                  window), so parity is exact per stat
+        share90 — returned share × 90 ÷ m_bar (parity: share90 × m_bar/90 ≡ share)
+        n_games — surviving sample size
+        series  — per-match per-90 share list, DISPLAY ONLY, never the estimate
+    The returned share is BYTE-IDENTICAL with or without this argument — all
+    per-90 work is additive reads on the already-built frame."""
     import logging as _logging
     _logger = _logging.getLogger("projection")
     # UDATED - pass team_id and comps to get_weighted_player_stats function
     player_stats = get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps,
                                              weight, mins, games)
+
+    def _fill_per90(final_share):
+        # Additive reads on the frame the share used — cannot alter the share.
+        if per90_details is None:
+            return
+        _w_sum = player_stats['Weight'].sum() if len(player_stats) else 0
+        if _w_sum == 0:
+            per90_details.update({'m_bar': None, 'share90': None, 'n_games': 0, 'series': []})
+            return
+        _m_bar = float((player_stats['Weight'] * player_stats['minutes']).sum() / _w_sum)
+        _series = [
+            # Team {stat} > 0 guaranteed for surviving rows (upstream drop);
+            # minutes > 50 by the sample filter.
+            {'fixture_id': int(_f), 'date': str(_k)[:10], 'mins': int(_m),
+             'share90': round((float(_p) * 90.0 / int(_m)) / float(_t), 4)}
+            for _f, _k, _m, _p, _t in zip(
+                player_stats['fixture_id'], player_stats['kickoff_datetime'], player_stats['minutes'],
+                player_stats[f'Player {stat}'], player_stats[f'Team {stat}'])
+        ]
+        per90_details.update({
+            'm_bar': round(_m_bar, 2),
+            'share90': float(final_share) * 90.0 / _m_bar if _m_bar > 0 else None,
+            'n_games': int(len(player_stats)),
+            'series': _series,
+        })
+
     # NOTE (2026-06-05): The Team {stat} > 0 filter used to live here. It now
     # runs upstream in get_player_stats *before* the window slice, so the
     # window is `games` fixtures of valid team denominators instead of
@@ -1671,6 +1707,7 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     # function the data is already filtered — this comment is a tombstone.
     weighted_sum = player_stats[f'Weighted Player {stat}'].sum()
     if weighted_sum == 0:
+        _fill_per90(0)
         return 0
     team_weighted_sum = player_stats[f'Weighted Team {stat}'].sum()
     # Denominator guard — without this, 0/0 produces NaN which cascades
@@ -1710,6 +1747,7 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
             f"dtypes: team_id={team_id_dtype}, fixture_id={fixture_id_dtype}. "
             f"sample: {sample}. Returning 0."
         )
+        _fill_per90(0)
         return 0
     weighted_average = weighted_sum / team_weighted_sum
     # else:
@@ -1719,7 +1757,11 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     #    else:
     #        weighted_average = player_stats[f'Weighted {stat} Proportion'].sum() / player_stats['Weight'].sum()
     if len(player_stats) < 10 and weighted_average > 0.2:
+        # Parity is against the RETURNED (damped) share — share90 carries the
+        # damp too, so share90 × m_bar/90 ≡ the value every consumer sees.
+        _fill_per90(weighted_average * 0.75)
         return weighted_average * 0.75
+    _fill_per90(weighted_average)
     return weighted_average
 
 
@@ -1727,7 +1769,8 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
 def distribute_team_predictions_to_players(player_stats, team_df, team_predictions, stats_types, fixtures, players,
                                            teams, comps, weight, season_id=None, competition_id=None, comp_teams=None,
                                            confirmed_lineups=None,
-                                           odds_for_fixture_players=None, odds_blend_weight=0.3):
+                                           odds_for_fixture_players=None, odds_blend_weight=0.3,
+                                           per90_collector=None):
     """
     confirmed_lineups: optional {(fixture_id, team_id): set(player_id)} — when
     a key exists for the (fixture, team) being projected, restrict the
@@ -1745,7 +1788,22 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
 
     odds_blend_weight: α applied to the bookie λ when blending. Caller
     passes its service-level weight (0.3 domestic, 0.5 euro_comp, 0.3 WC).
+
+    per90_collector: optional list — when provided, every share computed here
+    is ALSO captured in per-90 form (xmins-methodology.md §11 Task 1): one
+    entry per (player, stat) with share_legacy, share90, m_bar, n_games and
+    the display-only per-match series. Purely additive: shares and the
+    returned frame are byte-identical whether or not the collector is passed.
+    Only the FPL branch passes it (PL full runs); confirmed-lineup / props
+    re-projection modes do not (George, 2026-07-29).
     """
+
+    def _collect_per90(_pid, _stat_name, _share, _details):
+        if per90_collector is not None and _details:
+            per90_collector.append({
+                'player_id': int(_pid), 'stat_name': _stat_name,
+                'share_legacy': float(_share), **_details,
+            })
     # Player-prop blend helpers hoisted out of the per-row hot loop —
     # PLAYER_BLEND_STAT_NAMES maps DataFrame stat column name to
     # stats_type_id for the 3 v1 markets (Goals/Shots Total/SoT).
@@ -1823,15 +1881,19 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                     if stat_list[stat] == 'Goals':  # UPDATED - use stat_list[stat] instead of i
                         try:
                             # UPDATED - Pass team_id and comps
+                            _d90 = {} if per90_collector is not None else None
                             stat_prop_goals = get_player_weighted_average(player_stats, team_df, id, team_id, 'Goals',
                                                                           stats_types, fixtures, comps, weight,
-                                                                          games=50)
+                                                                          games=50, per90_details=_d90)
+                            _collect_per90(id, 'Goals', stat_prop_goals, _d90)
                             # if xG == True:
                             try:  # NEW - try-except block to handle cases where xG data may be insufficient
                                 # UPDATED - Pass team_id and comps
+                                _d90 = {} if per90_collector is not None else None
                                 stat_prop_xG = get_player_weighted_average(player_stats, team_df, id, team_id,
                                                                            'Expected Goals (xG)', stats_types, fixtures,
-                                                                           comps, weight, games=50)
+                                                                           comps, weight, games=50, per90_details=_d90)
+                                _collect_per90(id, 'Expected Goals (xG)', stat_prop_xG, _d90)
                                 if stat_prop_xG == 0:  # NEW - if xG proportion is 0, use only goals proportion
                                     stat_prop = stat_prop_goals  # NEW
                                 else:  # NEW - calculate average of goals and xG proportions
@@ -1854,16 +1916,22 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                         # rows in-memory before this runs. Other leagues fall through
                         # to the default Assists-only branch below.
                         try:
+                            _d90 = {} if per90_collector is not None else None
                             stat_prop_assists = get_player_weighted_average(
                                 player_stats, team_df, id, team_id, 'Assists',
                                 stats_types, fixtures, comps, weight, games=50,
+                                per90_details=_d90,
                             )
+                            _collect_per90(id, 'Assists', stat_prop_assists, _d90)
                             try:
+                                _d90 = {} if per90_collector is not None else None
                                 stat_prop_xA = get_player_weighted_average(
                                     player_stats, team_df, id, team_id,
                                     'Expected Assists (xA)', stats_types, fixtures,
                                     comps, weight, games=50,
+                                    per90_details=_d90,
                                 )
+                                _collect_per90(id, 'Expected Assists (xA)', stat_prop_xA, _d90)
                                 if stat_prop_xA == 0:
                                     stat_prop = stat_prop_assists
                                 else:
@@ -1875,8 +1943,11 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                     else:
                         try:
                             # UPDATED - Pass team_id and comps
+                            _d90 = {} if per90_collector is not None else None
                             stat_prop = get_player_weighted_average(player_stats, team_df, id, team_id, stat_list[stat],
-                                                                    stats_types, fixtures, comps, weight, games=50)
+                                                                    stats_types, fixtures, comps, weight, games=50,
+                                                                    per90_details=_d90)
+                            _collect_per90(id, stat_list[stat], stat_prop, _d90)
                             # if np.isnan(stat_prop) == False:
                             #    if stat_prop == 0:
                             #        player_pred_stats[stat_list[i]] = 0.00
