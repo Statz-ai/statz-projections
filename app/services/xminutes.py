@@ -72,6 +72,18 @@ XMIN_NEUTRAL_PRIORS = {
 }
 XMIN_DEFAULT_PRIOR = (0.60, 0.45)
 
+# P(full 90) neutral priors — third band (xmins-methodology.md §1-2, George
+# 2026-07-29). Keepers who play, finish; outfielders get subbed. Same
+# conservative stance as the pair above.
+XMIN_NEUTRAL_PRIORS_P90 = {"GK": 0.50, "DEF": 0.40, "MID": 0.22, "FWD": 0.20}
+XMIN_DEFAULT_PRIOR_P90 = 0.28
+
+
+def bands_to_xmins(p_play, p60, p90):
+    """Solio's cracked arithmetic (§2): the three bands carve the match into
+    buckets at their typical minutes. Monotonicity assumed enforced upstream."""
+    return 90.0 * p90 + 75.0 * (p60 - p90) + 30.0 * (p_play - p60)
+
 MINUTES_STAT_ID = 119  # stats_types 'Minutes Played'
 
 # Competition scope matching get_player_stats' international filter — the
@@ -235,6 +247,12 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
             for kick, m in pairs.itertuples(index=False):
                 rows.append((kick, m, XMIN_CROSS_CLUB_WEIGHT))
 
+    prior_p90 = min(
+        XMIN_NEUTRAL_PRIORS_P90.get(position, XMIN_DEFAULT_PRIOR_P90)
+        if position else XMIN_DEFAULT_PRIOR_P90,
+        prior_p60,
+    )
+
     if not rows:
         exposure = min(1.0, prior_xmin / XMIN_DEFAULT_START_MINUTES)
         return {
@@ -242,6 +260,10 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
             "xmin_start_sample": XMIN_DEFAULT_START_MINUTES,
             "exposure": exposure, "p60_if_start": 0.9,
             "n_window": 0, "n_apps": 0,
+            # Band view (additive, 2026-07-29): primitive = the three bands,
+            # xmin_bands derived via §2 arithmetic.
+            "p90": prior_p90, "p90_if_start": 0.5,
+            "xmin_bands": round(bands_to_xmins(prior_p_play, prior_p60, prior_p90), 1),
         }
 
     window = pd.DataFrame(rows, columns=["kickoff_datetime", "minutes", "mult"])
@@ -254,8 +276,10 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
 
     played = window["minutes"] > 0
     sixty = window["minutes"] >= 60
+    ninety = window["minutes"] >= 90  # full match — real minutes include stoppage
     p_play_hat = float((window["w"] * played).sum() / w_sum)
     p60_hat = float((window["w"] * sixty).sum() / w_sum)
+    p90_hat = float((window["w"] * ninety).sum() / w_sum)
     xmin_hat = float((window["w"] * window["minutes"]).sum() / w_sum)
 
     starts = window[window["minutes"] > XMIN_START_MIN]
@@ -263,9 +287,11 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
         s_w = starts["w"].sum()
         xmin_start_sample = float((starts["w"] * starts["minutes"]).sum() / s_w)
         p60_if_start = float((starts["w"] * (starts["minutes"] >= 60)).sum() / s_w)
+        p90_if_start = float((starts["w"] * (starts["minutes"] >= 90)).sum() / s_w)
     else:
         xmin_start_sample = XMIN_DEFAULT_START_MINUTES
         p60_if_start = 0.9
+        p90_if_start = 0.5
 
     n_apps = int(played.sum())
     alpha = min(1.0, n_apps / float(XMIN_PRIOR_APPS)) if XMIN_PRIOR_APPS > 0 else 1.0
@@ -273,6 +299,9 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
     p60 = alpha * p60_hat + (1 - alpha) * prior_p60
     xmin = alpha * xmin_hat + (1 - alpha) * prior_xmin
     p60 = min(p60, p_play)
+    # Third band, same blend + monotone chain: P(>0) ≥ P(>60) ≥ P(90).
+    p90 = alpha * p90_hat + (1 - alpha) * prior_p90
+    p90 = min(p90, p60)
 
     exposure = min(1.0, xmin / xmin_start_sample) if xmin_start_sample > 0 else 1.0
     return {
@@ -281,6 +310,11 @@ def get_expected_minutes(player_id, team_id, minutes_frame, past_fixtures,
         "xmin_start_sample": round(xmin_start_sample, 1),
         "exposure": round(exposure, 4), "p60_if_start": round(p60_if_start, 4),
         "n_window": int(len(window)), "n_apps": n_apps,
+        # Band view (additive, 2026-07-29): bands are the primitive,
+        # xmin_bands is presentation/assembly (§1-2). Legacy keys above are
+        # untouched so the live exposure path is byte-identical.
+        "p90": round(p90, 4), "p90_if_start": round(p90_if_start, 4),
+        "xmin_bands": round(bands_to_xmins(p_play, p60, p90), 1),
     }
 
 
@@ -288,12 +322,15 @@ def starter_override(profile):
     """Confirmed-XI override: he IS starting this fixture. Certainty replaces
     the base rates; how long he stays on is still his own start history."""
     p60 = profile.get("p60_if_start", 0.9)
+    p90 = min(profile.get("p90_if_start", 0.5), p60)
     return {
         **profile,
         "p_play": 1.0,
         "p60": round(p60, 4),
         "xmin": profile.get("xmin_start_sample", XMIN_DEFAULT_START_MINUTES),
         "exposure": 1.0,
+        "p90": round(p90, 4),
+        "xmin_bands": round(bands_to_xmins(1.0, p60, p90), 1),
     }
 
 
@@ -314,6 +351,15 @@ def stamp_xmin_columns(frame, profiles, confirmed_xi=None):
     frame["xmin_exposure"] = frame["player_id"].map(lambda p: _get(p, "exposure", 1.0))
     frame["xmin_expected"] = frame["player_id"].map(
         lambda p: _get(p, "xmin", XMIN_DEFAULT_START_MINUTES)
+    )
+    # Band view (additive): third band + §2-derived xMins + start length for
+    # the per-90 fallback conversion. Legacy columns above untouched.
+    frame["xmin_p90"] = frame["player_id"].map(lambda p: _get(p, "p90", 0.5))
+    frame["xmin_bands"] = frame["player_id"].map(
+        lambda p: _get(p, "xmin_bands", XMIN_DEFAULT_START_MINUTES)
+    )
+    frame["xmin_start_len"] = frame["player_id"].map(
+        lambda p: _get(p, "xmin_start_sample", XMIN_DEFAULT_START_MINUTES)
     )
 
     if confirmed_xi:
@@ -338,6 +384,8 @@ def stamp_xmin_columns(frame, profiles, confirmed_xi=None):
                     frame.at[idx, "xmin_p60"] = over["p60"]
                     frame.at[idx, "xmin_exposure"] = over["exposure"]
                     frame.at[idx, "xmin_expected"] = over["xmin"]
+                    frame.at[idx, "xmin_p90"] = over["p90"]
+                    frame.at[idx, "xmin_bands"] = over["xmin_bands"]
                 logger.info(
                     "xMinutes: starter override applied to %d confirmed-XI rows",
                     int(mask.sum()),
@@ -354,4 +402,34 @@ def apply_exposure_scaling(frame):
     for col in XMIN_SCALED_STAT_COLS:
         if col in frame.columns:
             frame[col] = frame[col] * frame["xmin_exposure"]
+    return frame
+
+
+def apply_per90_scaling(frame, m_bar_by_player_stat):
+    """Per-90 replacement for apply_exposure_scaling (George, 2026-07-29 —
+    supersedes the exposure machinery when FPL_PER90_POINTS is on).
+
+    The frame's stat columns hold team_proj × share (per-start λ, post ramp
+    and odds blend). Dividing by that stat's own m_bar converts to per-minute,
+    × xmin_bands re-expresses at expected minutes:
+
+        λ = column × xmin_bands ÷ m_bar   ( ≡ team_proj × share90 × xmin_bands/90 )
+
+    This also converts the bookmaker blend correctly — blended values are
+    per-match-if-he-starts, and ÷m_bar × xmin_bands is exactly the "convert
+    using start length" guard from the spec. m_bar is per (player_id, stat)
+    from the per-90 collector; rows without one fall back to the player's
+    xmin_start_len (same quantity, all-stat sample). Call ONLY on the
+    FPL-local copy."""
+    if "xmin_bands" not in frame.columns:
+        return frame
+    fallback = frame["xmin_start_len"].replace(0, XMIN_DEFAULT_START_MINUTES)
+    for col in XMIN_SCALED_STAT_COLS:
+        if col not in frame.columns:
+            continue
+        m_bar = frame["player_id"].map(
+            lambda p, _c=col: m_bar_by_player_stat.get((int(p), _c)) if pd.notna(p) else None
+        )
+        m_bar = pd.to_numeric(m_bar, errors="coerce").fillna(fallback).replace(0, XMIN_DEFAULT_START_MINUTES)
+        frame[col] = frame[col] * frame["xmin_bands"] / m_bar
     return frame

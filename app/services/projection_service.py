@@ -1607,8 +1607,9 @@ class ProjectionService:
         # Per-90 capture (xmins-methodology §11 Task 1): PL full runs only,
         # behind FPL_PER90_WRITE (default OFF — zero live effect until
         # deliberately enabled). Purely additive: shares byte-identical.
+        _per90_points_on = os.getenv("FPL_PER90_POINTS", "0") == "1"
         _per90_collector = (
-            [] if (league_id == 8 and os.getenv("FPL_PER90_WRITE", "0") == "1") else None
+            [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "0") == "1" or _per90_points_on)) else None
         )
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
@@ -1860,7 +1861,7 @@ class ProjectionService:
                     XMIN_ENABLED as _xmin_enabled,
                     eligible_past_fixtures, build_minutes_frame,
                     get_expected_minutes, stamp_xmin_columns,
-                    apply_exposure_scaling,
+                    apply_exposure_scaling, apply_per90_scaling,
                 )
                 _fpl_frame = pl_projections
                 if _xmin_enabled:
@@ -1885,7 +1886,22 @@ class ProjectionService:
                         _fpl_frame = pl_projections.copy()
                         _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                         confirmed_xi=_confirmed_lineups)
-                        _fpl_frame = apply_exposure_scaling(_fpl_frame)
+                        if _per90_points_on and _per90_collector:
+                            # Per-90 path (George, 2026-07-29): λ = column ×
+                            # xmin_bands ÷ that stat's own m̄ — i.e. team_proj
+                            # × share90 × xMins/90, xMins from the three
+                            # bands (§1-2). Supersedes exposure scaling.
+                            # Collector stat names → frame column aliases.
+                            _P90_ALIASES = {'Yellowcards': 'Yellow Cards'}
+                            _m_bar_lookup = {
+                                (r['player_id'], _P90_ALIASES.get(r['stat_name'], r['stat_name'])): r['m_bar']
+                                for r in _per90_collector if r.get('m_bar')
+                            }
+                            _fpl_frame = apply_per90_scaling(_fpl_frame, _m_bar_lookup)
+                            logger.info(f"[{league}] FPL per-90 points path ON — "
+                                        f"{len(_m_bar_lookup)} (player, stat) m̄ terms")
+                        else:
+                            _fpl_frame = apply_exposure_scaling(_fpl_frame)
                         # Team-down DC hit rate recomputed on the exposure-
                         # scaled inputs so def_con_pct is minutes-aware too.
                         _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
