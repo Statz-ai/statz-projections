@@ -1343,8 +1343,8 @@ class ProjectionAllTeams:
                 # (xmins-methodology §11 Task 1): PL only, FPL_PER90_WRITE
                 # gated (default OFF), additive, write failure non-fatal.
                 _per90_collector = (
-                    [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "0") == "1"
-                                               or os.getenv("FPL_PER90_POINTS", "0") == "1")) else None
+                    [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "1") == "1"
+                                               or os.getenv("FPL_PER90_POINTS", "1") == "1")) else None
                 )
                 pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                         fixtures_df, players, teams, comps, 0.97,
@@ -1524,7 +1524,7 @@ class ProjectionAllTeams:
                                 _fpl_frame = pl_projections.copy()
                                 _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                                 confirmed_xi=_confirmed_lineups)
-                                if (os.getenv("FPL_PER90_POINTS", "0") == "1") and _per90_collector:
+                                if (os.getenv("FPL_PER90_POINTS", "1") == "1") and _per90_collector:
                                     # Per-90 path — mirrors the single-league
                                     # branch exactly (see projection_service).
                                     _P90_ALIASES = {'Yellowcards': 'Yellow Cards'}

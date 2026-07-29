@@ -1607,9 +1607,9 @@ class ProjectionService:
         # Per-90 capture (xmins-methodology §11 Task 1): PL full runs only,
         # behind FPL_PER90_WRITE (default OFF — zero live effect until
         # deliberately enabled). Purely additive: shares byte-identical.
-        _per90_points_on = os.getenv("FPL_PER90_POINTS", "0") == "1"
+        _per90_points_on = os.getenv("FPL_PER90_POINTS", "1") == "1"
         _per90_collector = (
-            [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "0") == "1" or _per90_points_on)) else None
+            [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "1") == "1" or _per90_points_on)) else None
         )
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
