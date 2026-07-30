@@ -892,6 +892,7 @@ class ProjectionService:
 
             promoted = ts.promoted_team_names(
                 fixtures_df, teams, league_id, previous_season_id, comp_team_names,
+                team_ids_by_name=team_ids_by_name,
             )
             if promoted:
                 logger.info(f"[{league}] strength: promoted/new to tier — {sorted(promoted)}")

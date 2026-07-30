@@ -523,10 +523,25 @@ def build_strength_ratings(ratings, odds_df, mv_index, team_ids_by_name,
     return df
 
 
-def promoted_team_names(fixtures_df, teams_df, competition_id, previous_season_id, comp_team_names):
+def promoted_team_names(fixtures_df, teams_df, competition_id, previous_season_id,
+                        comp_team_names, team_ids_by_name=None):
     """Teams with no fixtures in this competition last season — i.e. promoted
     (or otherwise new to the tier), which is exactly the population whose base
-    rating is a cross-tier extrapolation."""
+    rating is a cross-tier extrapolation.
+
+    team_ids_by_name MUST come from the caller's competition-scoped resolver
+    (get_team_id). Club names are NOT unique in `teams`: Liverpool exists twice
+    (English id 8, Uruguayan id 976) as does Everton (English 13, Chilean
+    15064), and a naive teams_df.set_index('name') silently keeps the LAST
+    duplicate. That resolved both Merseyside clubs to South America, found no
+    Premier League fixtures for them and declared them promoted — putting two
+    established sides on the 20/50/30 newcomer weights (caught on the first
+    prod run, 2026-07-30). Same ambiguity the get_ratings comments flag for
+    'Nacional' (Portugal vs Uruguay).
+
+    Falls back to the naive map only when no resolver map is supplied, and
+    logs loudly if that map turns out to be ambiguous.
+    """
     if previous_season_id is None or fixtures_df is None or fixtures_df.empty:
         return set()
     prev = fixtures_df[
@@ -536,7 +551,18 @@ def promoted_team_names(fixtures_df, teams_df, competition_id, previous_season_i
     if prev.empty:
         return set()
     seen_ids = set(prev["home_team_id"].tolist()) | set(prev["away_team_id"].tolist())
-    id_by_name = teams_df.set_index("name")["id"].to_dict()
+
+    if team_ids_by_name:
+        id_by_name = team_ids_by_name
+    else:
+        dupes = teams_df["name"].duplicated(keep=False).sum()
+        if dupes:
+            logger.warning(
+                "  promoted detection using unscoped name->id map with %d duplicate team "
+                "names — promoted flags may be wrong", int(dupes),
+            )
+        id_by_name = teams_df.set_index("name")["id"].to_dict()
+
     return {
         name for name in comp_team_names
         if id_by_name.get(name) is not None and int(id_by_name[name]) not in seen_ids
