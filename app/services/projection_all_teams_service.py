@@ -1521,6 +1521,13 @@ class ProjectionAllTeams:
                                         int(_xm_pid), _xm_team_ids.get(_xm_tname),
                                         _xm_minutes, _xm_past_fx, position=_xm_pos,
                                     )
+                                # §12 Phase 0: persist standing (pre-XI) bands —
+                                # mirrors the single-league path.
+                                try:
+                                    from app.repository.fpl_per90_repo import insert_player_bands_async
+                                    await insert_player_bands_async(_xm_profiles, league_id)
+                                except Exception as _band_err:
+                                    logger.warning(f"[{league}] player-bands write failed (non-fatal): {_band_err}")
                                 _fpl_frame = pl_projections.copy()
                                 _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                                 confirmed_xi=_confirmed_lineups)
