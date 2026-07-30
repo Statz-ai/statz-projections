@@ -1937,8 +1937,9 @@ class ProjectionService:
                 except Exception as _extras_err:
                     logger.warning(f"[{league}] FPL extras pass failed (non-fatal): {_extras_err}")
                     _fpl_extras = None
-                _fpl_base = (pd.concat([pl_projections, _fpl_extras], ignore_index=True)
-                             if _fpl_extras is not None and len(_fpl_extras) else pl_projections)
+                # (_fpl_base built AFTER the enrichment below — 2026-07-30 fix:
+                # building it here missed the extra-stats columns and crashed
+                # the whole FPL stage with KeyError 'Clearances Average'.)
 
                 # Compute extra stats per player (Clearances, Blocked Shots, Ball Recovery averages)
                 for _col in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average',
@@ -2016,6 +2017,13 @@ class ProjectionService:
                     if _col not in pl_projections.columns:
                         pl_projections.loc[:, _col] = 0
 
+                _fpl_base = (pd.concat([pl_projections, _fpl_extras], ignore_index=True)
+                             if _fpl_extras is not None and len(_fpl_extras) else pl_projections)
+                for _c in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average', 'Tackles Won Average', 'Full Match Hit Rate', 'def_con_pct']:
+                    if _c in _fpl_base.columns:
+                        _fpl_base[_c] = _fpl_base[_c].fillna(0)
+                    else:
+                        _fpl_base[_c] = 0
                 # ---- xMinutes (George, 2026-07-24) ----
                 # Expected-minutes profile per player (p_play / p60 /
                 # exposure vs the per-start sample his rates came from),
