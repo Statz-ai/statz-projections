@@ -2399,6 +2399,30 @@ def get_bonus_points(bps_df, score_preds, expo_factor=0.1):
     return df
 
 
+def get_bonus_points_by_fixture(bps_df, score_preds, expo_factor=0.1):
+    """Same arithmetic as get_bonus_points but keyed by (fixture_id,
+    player_id). The Player/Team/Opponent merge downstream of the original
+    cross-joins the two legs of any matchup repeated inside the projection
+    window — per-row values were right (upsert last-wins) but the bonus
+    could land on the wrong leg. Callers merge on ['fixture_id',
+    'player_id'] (2026-07-30)."""
+    import pandas as pd
+    import numpy as np
+    parts = []
+    for i in range(len(score_preds)):
+        fixture_id = score_preds['id'].iloc[i]
+        fixture_bps = bps_df[bps_df['fixture_id'] == fixture_id].copy()
+        if fixture_bps.empty:
+            continue
+        fixture_bps['Total Scaled'] = np.exp(expo_factor * fixture_bps['Total'])
+        fixture_bps['Bonus Points'] = (fixture_bps['Total Scaled'] / fixture_bps['Total Scaled'].sum()) * (
+                    len(fixture_bps[fixture_bps['Total'] >= 7.5]) * 0.5)
+        parts.append(fixture_bps[['fixture_id', 'player_id', 'Bonus Points']])
+    if not parts:
+        return pd.DataFrame(columns=['fixture_id', 'player_id', 'Bonus Points'])
+    return pd.concat(parts, ignore_index=True)
+
+
 def get_dream11_points(pl_projections, score_preds, dream11_points_dict_gk, dream11_points_dict_def,
                        dream11_points_dict_mid, dream11_points_dict_fwd):
     import pandas as pd

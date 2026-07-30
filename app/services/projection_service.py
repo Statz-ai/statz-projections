@@ -2086,9 +2086,10 @@ class ProjectionService:
                     logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
                 fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
                 bps_df = bonus_points_score(_fpl_frame, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
-                bonus = get_bonus_points(bps_df, score_preds, expo_factor=0.1)
+                from app.services.statz_functions import get_bonus_points_by_fixture
+                bonus = get_bonus_points_by_fixture(bps_df, score_preds, expo_factor=0.1)
 
-                fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
+                fpl_df = fpl_point_df.merge(bonus, on=['fixture_id', 'player_id'], how='left')
                 fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
                 # Phase 2: pull def_con_pct off pl_projections so it lands
                 # in fpl_df for persistence. Keyed on (fixture_id, player_id)
@@ -2177,6 +2178,8 @@ class ProjectionService:
                 logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
                 _t = time.time()
                 await insert_fpl_projections_async(fpl_df)
+                from app.repository.fpl_repo import prune_stale_fpl_rows
+                await prune_stale_fpl_rows()
                 logger.info(f"[{league}] FPL projections inserted ({time.time()-_t:.1f}s)")
 
                 # Stale-row cleanup: the insert is an upsert, so it can't

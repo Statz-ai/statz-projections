@@ -122,3 +122,34 @@ async def cleanup_fpl_projections_async(gameweek_ids, keep_player_ids):
         return deleted
     finally:
         _db.pool.release(conn)
+
+
+async def prune_stale_fpl_rows(conn=None):
+    """Delete fpl_projections rows whose gameweek belongs to a non-current
+    season (2026-07-30: 363 May relics survived because upserts never
+    delete — they polluted raw per-player sums and debugging). Called after
+    each insert; season-scoped so current-season history is untouched."""
+    from app.database import get_connection
+    import app.database as _db
+    own = conn is None
+    if own:
+        conn = await get_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """DELETE f FROM fpl_projections f
+                   JOIN gameweeks g ON g.id = f.gameweek_id
+                   WHERE g.season_id != (
+                       SELECT id FROM seasons
+                       WHERE competition_id = 8 AND is_current = 1 LIMIT 1
+                   )"""
+            )
+            n = cur.rowcount
+        await conn.commit()
+        if n:
+            import logging
+            logging.getLogger("fpl_repo").info(f"[fpl_projections] pruned {n} old-season rows")
+        return n
+    finally:
+        if own and _db.pool:
+            _db.pool.release(conn)
