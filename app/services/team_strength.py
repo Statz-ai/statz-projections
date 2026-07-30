@@ -76,6 +76,22 @@ GLIDE_MATCHES = int(os.getenv("STRENGTH_GLIDE_MATCHES", "10"))
 # Outright odds older than this are ignored (and logged).
 ODDS_MAX_AGE_DAYS = int(os.getenv("STRENGTH_ODDS_MAX_AGE_DAYS", "7"))
 
+# Minimum market DEPTH before the market component is trusted, as a fraction
+# of the league size: the deepest CDF point must reach at least this far down
+# the table.
+#
+# Outright coverage varies enormously by competition (checked 2026-07-30):
+# the Premier League has 9 markets, the Championship and Scottish Premiership
+# 3 spanning both ends, but Serie A / Ligue 1 / Eredivisie carry ONLY the
+# title market and La Liga / Bundesliga only title + top-4. A lone title
+# market is a single CDF point at position 1, which barely discriminates
+# below the favourites — a 30% title shot implies ~8th and a 1% shot ~11th —
+# so at a 30% weight it would flatten differences the base rating genuinely
+# knows about. Where the odds don't describe the table deeply enough, the
+# market component is dropped and its weight redistributed to base + squad
+# value rather than injecting a compressed signal.
+MIN_MARKET_DEPTH = float(os.getenv("STRENGTH_MIN_MARKET_DEPTH", "0.5"))
+
 # Which statistic summarises the market's implied finishing distribution.
 # "mean" (default) uses the whole distribution; "median" is available and is
 # robust to catastrophe tails, but we handle the one live case explicitly
@@ -428,6 +444,16 @@ def build_strength_ratings(ratings, odds_df, mv_index, team_ids_by_name,
     if odds_df is not None and not odds_df.empty:
         known_ids = [int(t) for t in df["team_id"].dropna().unique()]
         cdfs = market_position_cdf(odds_df, known_ids, size, relegation_from, now=now)
+        # Depth gate: outrights that only price the title race can't say
+        # anything useful about the rest of the table (see MIN_MARKET_DEPTH).
+        max_k = max((k for pts in cdfs.values() for k, _ in pts), default=0)
+        if max_k < size * MIN_MARKET_DEPTH:
+            logger.info(
+                "  market component DROPPED — odds only describe the top %d of %d places "
+                "(need %d+); weight redistributed to base + squad value",
+                max_k, size, int(np.ceil(size * MIN_MARKET_DEPTH)),
+            )
+            cdfs = {}
         df["market_position"] = df["team_id"].map(
             lambda t: implied_position(cdfs[int(t)], size)
             if pd.notna(t) and int(t) in cdfs and cdfs[int(t)] else np.nan
