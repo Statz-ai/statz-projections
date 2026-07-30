@@ -1568,6 +1568,12 @@ class ProjectionAllTeams:
                                                f"unscaled points: {_xm_err}", exc_info=True)
                                 _fpl_frame = pl_projections
 
+                        # Assembly-bundle snapshot — mirrors single-league path.
+                        try:
+                            from app.repository.fpl_recalc_repo import save_assembly_bundles
+                            await save_assembly_bundles(_fpl_frame, score_preds, team_projections)
+                        except Exception as _bundle_err:
+                            logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
                         fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
                         bps_df = bonus_points_score(_fpl_frame, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
                         bonus = get_bonus_points(bps_df, score_preds, expo_factor=0.1)

@@ -378,3 +378,23 @@ async def promote_model_endpoint(model_id: int, request: PromoteModelRequest = N
 # All callers gone: admin panel "Run Now"/"Run All" stopped passing
 # fetch_first (commit 7.1b), schedule-check stopped calling it (commit
 # 0b5e8d65), admin endpoint removed (commit 7.1).
+
+
+class FplRecalcRequest(BaseModel):
+    player_id: int
+
+
+@router.post("/fpl/recalc-player")
+async def fpl_recalc_player(request: FplRecalcRequest):
+    """Instant per-player FPL recalc after an admin dial edit (George,
+    2026-07-30). Reassembles the player's points from the last run's
+    persisted scoring snapshot — no global lock: a single-player UPDATE is
+    safe alongside a full run (last-writer-wins; the run reads the same
+    dials, so they converge)."""
+    from app.services.fpl_recalc_service import recalc_fpl_player
+    try:
+        result = await recalc_fpl_player(request.player_id)
+    except Exception as err:
+        logger.exception("fpl recalc failed")
+        return {"ok": False, "error": str(err)}
+    return result
