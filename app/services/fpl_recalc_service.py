@@ -34,7 +34,7 @@ from app.services.fpl_scoring_constants import (
     FPL_BONUS_GK, FPL_BONUS_DEF, FPL_BONUS_MID, FPL_BONUS_FWD,
 )
 from app.services.statz_functions import (
-    get_fpl_points, bonus_points_score, get_bonus_points,
+    get_fpl_points, bonus_points_score,
 )
 from app.services.xminutes import bands_to_xmins, XMIN_SCALED_STAT_COLS
 
@@ -117,11 +117,30 @@ async def recalc_fpl_players(player_ids) -> dict:
     frame = frame.reset_index(drop=True)
     pts = get_fpl_points(frame, score_preds, FPL_POINTS_GK, FPL_POINTS_DEF, FPL_POINTS_MID, FPL_POINTS_FWD)
     bps = bonus_points_score(frame, score_preds, FPL_BONUS_GK, FPL_BONUS_DEF, FPL_BONUS_MID, FPL_BONUS_FWD)
-    bonus = get_bonus_points(bps, score_preds, expo_factor=0.1)
 
-    fpl_df = pts.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
+    # Bonus attached PER FIXTURE. The shared get_bonus_points drops
+    # fixture_id, and the run merges it on Player/Team/Opponent — fine
+    # per-row after upsert, but a repeated matchup inside the window
+    # cross-joins its two legs (double-counted totals, swapped-leg bonus).
+    # Same arithmetic here, fixture_id kept.
+    import numpy as np
+    _bonus_parts = []
+    for _i in range(len(score_preds)):
+        _fid = score_preds['id'].iloc[_i]
+        _fb = bps[bps['fixture_id'] == _fid].copy()
+        if _fb.empty:
+            continue
+        _fb['Total Scaled'] = np.exp(0.1 * _fb['Total'])
+        _fb['Bonus Points'] = (_fb['Total Scaled'] / _fb['Total Scaled'].sum()) * (
+            len(_fb[_fb['Total'] >= 7.5]) * 0.5)
+        _bonus_parts.append(_fb[['fixture_id', 'player_id', 'Bonus Points']])
+    bonus = pd.concat(_bonus_parts, ignore_index=True) if _bonus_parts else pd.DataFrame(
+        columns=['fixture_id', 'player_id', 'Bonus Points'])
+
+    fpl_df = pts.merge(bonus, on=['fixture_id', 'player_id'], how='left')
     fpl_df['Bonus Points'] = fpl_df['Bonus Points'].fillna(0)
     fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points']
+    fpl_df = fpl_df.drop_duplicates(['player_id', 'fixture_id'])
 
     # Row context (def_con_pct / xmin_bands) back onto the scored rows.
     ctx = frame[['fixture_id', 'player_id', 'def_con_pct', 'xmin_bands']].drop_duplicates(['fixture_id', 'player_id'])
