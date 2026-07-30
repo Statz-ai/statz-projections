@@ -59,6 +59,13 @@ class ProjectionService:
     # don't already flow through ctx. Safe because projections are serialised
     # by the cross-worker file lock — only one runs at a time.
     _current_source = None
+    # Per-run inputs for the Team Strength blend, stashed by _prepare_league
+    # because they're intermediate state the returned ratings frame drops:
+    #   pre_mv    ratings before the market-value adjustment (base component)
+    #   mv_index  the MV Index per team (squad-value component)
+    # Same lifecycle/safety as _current_source — runs are serialised by the
+    # cross-worker projection lock, so only one league is ever in flight.
+    _strength_inputs = {}
 
     @staticmethod
     def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to):
@@ -651,6 +658,15 @@ class ProjectionService:
 
         # In[ ]:
 
+        # Team Strength inputs (George, 2026-07-30): snapshot the ratings
+        # BEFORE the market-value adjustment. team_strength blends squad value
+        # in as its own weighted component, so its base component must be the
+        # pre-MV rating or squad value is counted twice.
+        ProjectionService._strength_inputs = {
+            'pre_mv': ratings[['Team', 'Attack', 'Defense']].copy(),
+            'mv_index': {},
+        }
+
         try:
             market_values = await get_market_value_with_cache(league_dashed, div, country_code)
             market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(
@@ -716,6 +732,12 @@ class ProjectionService:
                 # Fill unmapped teams with neutral MV Index (1.0) instead of crashing
                 ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
                 ratings['MV Index Reverse'] = ratings['MV Index Reverse'].fillna(1.0)
+
+            # Hand the finished MV Index to team_strength as its squad-value
+            # component (the same index, not a second derivation).
+            ProjectionService._strength_inputs['mv_index'] = dict(
+                zip(ratings['Team'], pd.to_numeric(ratings['MV Index'], errors='coerce'))
+            )
 
             total_match_perc = 38 / total_matches  # NEW - This calculates the percentage of total matches played so far in the season compared to Premier League
             # mv_beta is already passed in from _setup_league (line 654: mv_beta = ctx.mv_beta),
@@ -828,6 +850,96 @@ class ProjectionService:
 
 
         return ratings
+
+    async def _resolve_sim_ratings(self, league, league_id, ratings, teams, comp_teams,
+                                   fixtures_df, current_season_id, previous_season_id,
+                                   matches_played):
+        """Ratings for the SEASON SIMULATION only.
+
+        Blends the form-tilted base rating with bookmaker outright odds and
+        squad market value into a Team Strength rating (app/services/
+        team_strength.py), always computing and persisting it, but only
+        RETURNING it where the competition has opted in via
+        competition_projection_config.use_strength_ratings. That lets the two
+        be compared on real data before anything switches over.
+
+        Everything else in a run — match projections, team_projections, props,
+        FPL — keeps using `ratings`, deliberately: form-tilting is right for
+        the next fixture and wrong for a 38-game projection.
+
+        Never raises: any failure falls back to the base ratings and logs.
+        """
+        from app.services import team_strength as ts
+
+        if not ts.STRENGTH_ENABLED:
+            return ratings
+
+        try:
+            inputs = ProjectionService._strength_inputs or {}
+            comp_team_names = [t for t in ratings['Team'].tolist()]
+            team_ids_by_name = {}
+            for name in comp_team_names:
+                try:
+                    team_ids_by_name[name] = int(get_team_id(name, teams, league_id, comp_teams))
+                except Exception:
+                    continue
+
+            _conn = await get_source_connection()
+            try:
+                odds_df = await ts.load_outright_odds(_conn, league_id, current_season_id)
+            finally:
+                release_source_connection(_conn)
+
+            promoted = ts.promoted_team_names(
+                fixtures_df, teams, league_id, previous_season_id, comp_team_names,
+            )
+            if promoted:
+                logger.info(f"[{league}] strength: promoted/new to tier — {sorted(promoted)}")
+
+            strength = ts.build_strength_ratings(
+                ratings=ratings[['Team', 'Attack', 'Defense']],
+                odds_df=odds_df,
+                mv_index=inputs.get('mv_index') or {},
+                team_ids_by_name=team_ids_by_name,
+                promoted_teams=promoted,
+                matches_played=matches_played,
+                size=len(comp_team_names),
+                base_ratings=inputs.get('pre_mv'),
+            )
+        except Exception as err:
+            logger.warning(f"[{league}] Team strength failed — season simulation falls back to "
+                           f"base ratings: {err}", exc_info=True)
+            return ratings
+
+        if strength is None or strength.empty:
+            logger.warning(f"[{league}] Team strength produced no rows — using base ratings")
+            return ratings
+
+        try:
+            from app.repository.team_strength_repo import insert_team_strength_async
+            await insert_team_strength_async(strength, league_id, current_season_id)
+        except Exception as err:
+            logger.warning(f"[{league}] team_strength_ratings write failed (non-fatal): {err}")
+
+        if not self._use_strength_ratings(league):
+            logger.info(f"[{league}] Team strength computed + stored, NOT enabled — "
+                        f"season simulation uses base ratings")
+            return ratings
+
+        logger.info(f"[{league}] Season simulation using TEAM STRENGTH ratings")
+        return strength[['Team', 'Attack', 'Defense']]
+
+    @staticmethod
+    def _use_strength_ratings(league: str) -> bool:
+        """Per-competition opt-in from competition_projection_config."""
+        try:
+            cfg = ProjectionService._current_source.projection_config
+            if cfg is None or cfg.empty or 'use_strength_ratings' not in cfg.columns:
+                return False
+            row = cfg[cfg['league_name'] == league]
+            return bool(int(row.iloc[0]['use_strength_ratings'])) if len(row) else False
+        except Exception:
+            return False
 
     async def projections(self, league_request):
         league = league_request.league or 'Championship'
@@ -1181,7 +1293,16 @@ class ProjectionService:
             season_fixtures.reset_index(drop=True, inplace=True)
             season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
-            season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
+            # Season simulation runs on market-anchored TEAM STRENGTH, not the
+            # form-tilted `ratings` — see _resolve_sim_ratings.
+            _sim_ratings = await self._resolve_sim_ratings(
+                league=league, league_id=league_id, ratings=ratings, teams=teams,
+                comp_teams=comp_teams, fixtures_df=fixtures_df,
+                current_season_id=current_season_id, previous_season_id=previous_season_id,
+                matches_played=matches_played,
+            )
+
+            season_score_preds = make_round_goal_prediction(season_fixtures, _sim_ratings, avg_home_goals, avg_away_goals)
 
             for i in range(len(season_score_preds)):
                 home_goals = season_score_preds['Home Goals'][i]
@@ -2799,7 +2920,16 @@ class ProjectionService:
             season_fixtures.reset_index(drop=True, inplace=True)
             season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
-            season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
+            # Same strength swap as the nightly `projections` path — both write
+            # league_projections, so they must agree or the last run wins.
+            _sim_ratings = await self._resolve_sim_ratings(
+                league=league, league_id=league_id, ratings=ratings, teams=teams,
+                comp_teams=comp_teams, fixtures_df=fixtures_df,
+                current_season_id=current_season_id, previous_season_id=previous_season_id,
+                matches_played=matches_played,
+            )
+
+            season_score_preds = make_round_goal_prediction(season_fixtures, _sim_ratings, avg_home_goals, avg_away_goals)
 
             for i in range(len(season_score_preds)):
                 home_goals = season_score_preds['Home Goals'][i]
