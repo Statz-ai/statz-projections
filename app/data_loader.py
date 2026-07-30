@@ -133,6 +133,7 @@ class LeagueDataLoader:
         self.league_weightings: Optional[pd.DataFrame] = None
         self.projection_config: Optional[pd.DataFrame] = None
         self.promoted_team_ratings: Optional[pd.DataFrame] = None
+        self.fpl_player_dials: Optional[pd.DataFrame] = None
         self.transfermarkt_team_mappings: Optional[pd.DataFrame] = None
         self.team_ratings: Optional[pd.DataFrame] = None
         self.fpl_player_mappings: Optional[pd.DataFrame] = None
@@ -910,6 +911,13 @@ class LeagueDataLoader:
             FROM promoted_team_ratings ptr
             JOIN competitions c ON c.id = ptr.competition_id
             """,
+        )
+        # Admin FPL player dials (xmins-methodology §12 Phase 5): standing
+        # per-player overrides, one row per player, NULL column = use model,
+        # non-NULL REPLACES the model value at FPL assembly. All fractions 0-1.
+        self.fpl_player_dials = await self._sql_to_df(
+            conn,
+            "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_pct FROM fpl_player_dials",
         )
         self.projection_config = await self._sql_to_df(
             conn,

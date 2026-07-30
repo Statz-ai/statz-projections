@@ -1983,7 +1983,11 @@ class ProjectionService:
                     eligible_past_fixtures, build_minutes_frame,
                     get_expected_minutes, stamp_xmin_columns,
                     apply_exposure_scaling, apply_per90_scaling,
+                    apply_band_dials, apply_share_dials,
                 )
+                # Admin dials (§12 Phase 5) — standing per-player overrides,
+                # loaded via the same DB-source pattern as promoted ratings.
+                _fpl_dials = getattr(ProjectionService._current_source, 'fpl_player_dials', None)
                 _fpl_frame = pl_projections
                 if _xmin_enabled:
                     try:
@@ -2012,6 +2016,12 @@ class ProjectionService:
                             await insert_player_bands_async(_xm_profiles, league_id)
                         except Exception as _band_err:
                             logger.warning(f"[{league}] player-bands write failed (non-fatal): {_band_err}")
+                        # §12 Phase 5: band dials replace standing model bands
+                        # AFTER the model-values persist above, BEFORE stamping.
+                        # Confirmed-XI snap still wins at fixture level.
+                        _n_dials = apply_band_dials(_xm_profiles, _fpl_dials)
+                        if _n_dials:
+                            logger.info(f"[{league}] FPL dials: bands replaced for {_n_dials} players")
                         _fpl_frame = pl_projections.copy()
                         _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                         confirmed_xi=_confirmed_lineups)
@@ -2035,6 +2045,9 @@ class ProjectionService:
                         # scaled inputs so def_con_pct is minutes-aware too.
                         _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
                         _fpl_frame['def_con_pct'] = (_fpl_frame['CBIT Hit Rate'] * 100).round(2)
+                        # §12 Phase 5: share/defcon dials — replacement at
+                        # assembly, after scaling + CBIT recompute.
+                        _fpl_frame = apply_share_dials(_fpl_frame, _fpl_dials, team_projections)
                         logger.info(f"[{league}] FPL xMinutes: profiles for {len(_xm_profiles)} "
                                     f"players ({time.time()-_t_xm:.1f}s)")
                     except Exception as _xm_err:

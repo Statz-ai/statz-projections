@@ -405,6 +405,93 @@ def apply_exposure_scaling(frame):
     return frame
 
 
+def apply_band_dials(profiles, dials_df):
+    """Admin band dials (xmins-methodology §12 Phase 5): a NON-NULL
+    p_play/p60/p90 dial REPLACES the standing model band (replacement, not
+    delta); xmin_bands re-derives via §2; monotone chain re-enforced.
+
+    Call AFTER fpl_player_bands persistence (that table holds MODEL values —
+    the panel diffs against them) and BEFORE stamp_xmin_columns. Confirmed-XI
+    starter_override still wins at fixture level — the manager's teamsheet is
+    fixture truth, dials are standing opinion. Returns players touched."""
+    if dials_df is None or len(dials_df) == 0:
+        return 0
+    touched = 0
+    for row in dials_df.itertuples(index=False):
+        pid = int(row.player_id)
+        prof = profiles.get(pid)
+        if not prof:
+            continue
+        dial_p_play = None if pd.isna(row.p_play) else float(row.p_play)
+        dial_p60 = None if pd.isna(row.p60) else float(row.p60)
+        dial_p90 = None if pd.isna(row.p90) else float(row.p90)
+        if dial_p_play is None and dial_p60 is None and dial_p90 is None:
+            continue
+        p_play = dial_p_play if dial_p_play is not None else prof["p_play"]
+        p60 = dial_p60 if dial_p60 is not None else prof["p60"]
+        p90 = dial_p90 if dial_p90 is not None else prof["p90"]
+        p60 = min(p60, p_play)
+        p90 = min(p90, p60)
+        prof.update({
+            "p_play": round(p_play, 4), "p60": round(p60, 4), "p90": round(p90, 4),
+            "xmin_bands": round(bands_to_xmins(p_play, p60, p90), 1),
+        })
+        touched += 1
+    return touched
+
+
+def apply_share_dials(frame, dials_df, team_predictions):
+    """Admin share dials (§12 Phase 5): goal_share / assist_share are per-90
+    shares that REPLACE the model's assembled λ outright —
+        λ = team fixture projection × dial × xmin_bands ÷ 90
+    (bypasses ramp and odds blend by design: replacement, not delta).
+    defcon_pct REPLACES the DC hit rate. Call on the FPL-local frame AFTER
+    apply_per90_scaling and any CBIT recompute."""
+    if dials_df is None or len(dials_df) == 0:
+        return frame
+    team_cols = [c for c in ("Goals", "Assists") if c in team_predictions.columns]
+    tp = team_predictions[["fixture_id", "Team"] + team_cols].rename(
+        columns={c: f"_team_{c}" for c in team_cols}
+    ).drop_duplicates(subset=["fixture_id", "Team"])
+    frame = frame.merge(tp, on=["fixture_id", "Team"], how="left")
+
+    for stat_col, dial_col in (("Goals", "goal_share"), ("Assists", "assist_share")):
+        if stat_col not in frame.columns or f"_team_{stat_col}" not in frame.columns:
+            continue
+        dial_map = {
+            int(r.player_id): float(getattr(r, dial_col))
+            for r in dials_df.itertuples(index=False)
+            if not pd.isna(getattr(r, dial_col))
+        }
+        if not dial_map:
+            continue
+        mask = frame["player_id"].map(lambda p: pd.notna(p) and int(p) in dial_map)
+        if mask.any():
+            dial_vals = frame.loc[mask, "player_id"].map(lambda p: dial_map[int(p)])
+            frame.loc[mask, stat_col] = (
+                frame.loc[mask, f"_team_{stat_col}"].fillna(0)
+                * dial_vals * frame.loc[mask, "xmin_bands"] / 90.0
+            )
+            logger.info("xMinutes dials: %s replaced for %d players", dial_col, len(dial_map))
+
+    dc_map = {
+        int(r.player_id): float(r.defcon_pct)
+        for r in dials_df.itertuples(index=False)
+        if not pd.isna(r.defcon_pct)
+    }
+    if dc_map:
+        mask = frame["player_id"].map(lambda p: pd.notna(p) and int(p) in dc_map)
+        if mask.any():
+            dc_vals = frame.loc[mask, "player_id"].map(lambda p: dc_map[int(p)])
+            if "CBIT Hit Rate" in frame.columns:
+                frame.loc[mask, "CBIT Hit Rate"] = dc_vals
+            if "def_con_pct" in frame.columns:
+                frame.loc[mask, "def_con_pct"] = (dc_vals * 100).round(2)
+            logger.info("xMinutes dials: defcon_pct replaced for %d players", len(dc_map))
+
+    return frame.drop(columns=[f"_team_{c}" for c in team_cols], errors="ignore")
+
+
 def apply_per90_scaling(frame, m_bar_by_player_stat):
     """Per-90 replacement for apply_exposure_scaling (George, 2026-07-29 —
     supersedes the exposure machinery when FPL_PER90_POINTS is on).

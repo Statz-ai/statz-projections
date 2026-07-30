@@ -1500,7 +1500,9 @@ class ProjectionAllTeams:
                             eligible_past_fixtures, build_minutes_frame,
                             get_expected_minutes, stamp_xmin_columns,
                             apply_exposure_scaling, apply_per90_scaling,
+                            apply_band_dials, apply_share_dials,
                         )
+                        _fpl_dials = getattr(ProjectionService._current_source, 'fpl_player_dials', None)
                         _fpl_frame = pl_projections
                         if _xmin_enabled:
                             try:
@@ -1528,6 +1530,11 @@ class ProjectionAllTeams:
                                     await insert_player_bands_async(_xm_profiles, league_id)
                                 except Exception as _band_err:
                                     logger.warning(f"[{league}] player-bands write failed (non-fatal): {_band_err}")
+                                # §12 Phase 5: band dials replace standing model
+                                # bands (after model persist, before stamp).
+                                _n_dials = apply_band_dials(_xm_profiles, _fpl_dials)
+                                if _n_dials:
+                                    logger.info(f"[{league}] FPL dials: bands replaced for {_n_dials} players")
                                 _fpl_frame = pl_projections.copy()
                                 _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                                 confirmed_xi=_confirmed_lineups)
@@ -1551,6 +1558,9 @@ class ProjectionAllTeams:
                                     _fpl_frame['CBIT Hit Rate'] = (
                                         _fpl_frame['CBIT Hit Rate'] * _fpl_frame['xmin_exposure']
                                     )
+                                # §12 Phase 5: share/defcon dials — replacement
+                                # at assembly, mirrors single-league path.
+                                _fpl_frame = apply_share_dials(_fpl_frame, _fpl_dials, team_projections)
                                 logger.info(f"[{league}] FPL xMinutes: profiles for {len(_xm_profiles)} "
                                             f"players ({time.time()-_t_xm:.1f}s)")
                             except Exception as _xm_err:
