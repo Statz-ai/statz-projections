@@ -90,15 +90,18 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
     return affected
 
 
-async def load_bundles_for_player(player_id: int):
-    """All bundle rows (players + context) for every fixture the player has a
-    bundle row in. Returns (frame_df, score_preds_df, team_stats_by_fixture)."""
+async def load_bundles_for_players(player_ids):
+    """All bundle rows (players + context) for every fixture ANY of the given
+    players appears in. Returns (frame_df, score_preds_df, team_stats_by_fixture)."""
+    if not player_ids:
+        return None, None, None
     conn = await get_connection()
     try:
         async with conn.cursor() as cur:
+            ph_p = ",".join(["%s"] * len(player_ids))
             await cur.execute(
-                "SELECT fixture_id FROM fpl_assembly_bundles WHERE player_id = %s",
-                (player_id,),
+                f"SELECT DISTINCT fixture_id FROM fpl_assembly_bundles WHERE player_id IN ({ph_p})",
+                tuple(int(p) for p in player_ids),
             )
             fixture_ids = [r[0] for r in await cur.fetchall()]
             if not fixture_ids:
@@ -130,24 +133,24 @@ async def load_bundles_for_player(player_id: int):
     return frame, score_preds, team_stats
 
 
-async def load_player_dial_and_bands(player_id: int):
+async def load_all_dials_and_bands():
+    """ALL dial rows + model bands, keyed by player_id. Recalc applies every
+    dial present in the loaded frame — never just the requested players —
+    so updating full fixture casts can't regress another dialed player to
+    model values."""
     conn = await get_connection()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT p_play, p60, p90, goal_share, assist_share, defcon_pct FROM fpl_player_dials WHERE player_id = %s",
-                (player_id,),
+                "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_pct FROM fpl_player_dials"
             )
-            dial = await cur.fetchone()
-            await cur.execute(
-                "SELECT p_play, p60, p90 FROM fpl_player_bands WHERE player_id = %s",
-                (player_id,),
-            )
-            bands = await cur.fetchone()
+            dials = {int(r[0]): r[1:] for r in await cur.fetchall()}
+            await cur.execute("SELECT player_id, p_play, p60, p90 FROM fpl_player_bands")
+            bands = {int(r[0]): r[1:] for r in await cur.fetchall()}
     finally:
         if _db.pool:
             _db.pool.release(conn)
-    return dial, bands
+    return dials, bands
 
 
 async def update_player_fpl_points(updates):
@@ -170,22 +173,3 @@ async def update_player_fpl_points(updates):
         if _db.pool:
             _db.pool.release(conn)
     return len(updates)
-
-
-async def update_player_bundles(frame, player_id: int):
-    """Write the dialed player's patched rows back so consecutive recalcs
-    compose from current state, not the last full run's."""
-    sub = frame[frame['player_id'] == player_id]
-    rows = [
-        (int(r['fixture_id']), int(r['player_id']), json.dumps(r, default=str))
-        for r in sub.to_dict('records')
-    ]
-    if not rows:
-        return 0
-    sql = """
-    INSERT INTO fpl_assembly_bundles (fixture_id, player_id, payload, created_at, updated_at)
-    VALUES (%s, %s, %s, NOW(), NOW())
-    AS new
-    ON DUPLICATE KEY UPDATE payload = new.payload, updated_at = NOW()
-    """
-    return await execute_chunked(sql, rows, label="[fpl_assembly_bundles:patch]")

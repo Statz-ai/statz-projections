@@ -381,7 +381,8 @@ async def promote_model_endpoint(model_id: int, request: PromoteModelRequest = N
 
 
 class FplRecalcRequest(BaseModel):
-    player_id: int
+    player_id: int = None
+    player_ids: list = None
 
 
 @router.post("/fpl/recalc-player")
@@ -391,9 +392,10 @@ async def fpl_recalc_player(request: FplRecalcRequest):
     persisted scoring snapshot — no global lock: a single-player UPDATE is
     safe alongside a full run (last-writer-wins; the run reads the same
     dials, so they converge)."""
-    from app.services.fpl_recalc_service import recalc_fpl_player
+    from app.services.fpl_recalc_service import recalc_fpl_players
+    ids = request.player_ids or ([request.player_id] if request.player_id else [])
     try:
-        result = await recalc_fpl_player(request.player_id)
+        result = await recalc_fpl_players(ids)
     except Exception as err:
         logger.exception("fpl recalc failed")
         return {"ok": False, "error": str(err)}

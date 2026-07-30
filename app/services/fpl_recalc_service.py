@@ -1,32 +1,32 @@
-"""Instant per-player FPL recalc (George, 2026-07-30).
+"""Instant FPL recalc for edited players (George, 2026-07-30).
 
-A dial edit invalidates nothing expensive — team projections and shares are
-untouched — so points reassemble from the last run's persisted scoring
+Dial edits invalidate nothing expensive — team projections and shares are
+untouched — so points reassemble from the last run's PURE-MODEL scoring
 snapshot (fpl_assembly_bundles) in seconds:
 
-    1. load bundles for every fixture the player appears in (full casts,
-       so bonus ranks against real context)
-    2. patch the dialed player's rows:
-       - bands: ratio-rescale count columns by new_xmin_bands / old_xmin_bands
-         (columns are linear in xmin_bands — exact), restamp band columns
-       - goal/assist share dials: column := team stat projection × dial ×
-         new_xmin_bands / 90 (replacement semantics, §12 Phase 5)
-       - defcon dial: CBIT Hit Rate / def_con_pct := dial
-    3. re-score with the run's own functions (get_fpl_points +
-       bonus_points_score + get_bonus_points, same constants)
-    4. UPDATE fpl_projections for the dialed player only; write patched
-       bundle rows back so consecutive edits compose.
+    1. requested player_ids define the FIXTURE closure (bonus is
+       fixture-scoped, so an edit's true blast radius is the fixtures the
+       player appears in); full casts load for exact bonus ranking
+    2. EVERY dial present in the loaded frame is applied from scratch on
+       the model snapshot — not just the requested players — so updating
+       full casts can never regress another dialed player, Reset-to-model
+       is instant/exact, and consecutive edits can't compound
+    3. re-score with the run's own functions + verbatim constants
+    4. bulk UPDATE fpl_projections for all players in the re-scored
+       fixtures (trues the teammate bonus ripple within the closure too)
 
-Full runs remain the truth-refresher (odds blend, new shares, teammates'
-bonus ripple); this fast-forwards the edited player between runs.
+Full runs stay the model refresher (new data, odds blend); this
+fast-forwards assembly between them. Duration is measured and returned —
+the admin panel displays the real number.
 """
 
 import logging
+import time
 
 import pandas as pd
 
 from app.repository.fpl_recalc_repo import (
-    load_bundles_for_player, load_player_dial_and_bands,
+    load_bundles_for_players, load_all_dials_and_bands,
     update_player_fpl_points,
 )
 from app.services.fpl_scoring_constants import (
@@ -51,25 +51,13 @@ def _f(v, default=None):
     return default if pd.isna(v) else v
 
 
-async def recalc_fpl_player(player_id: int) -> dict:
-    player_id = int(player_id)
-    dial, model_bands = await load_player_dial_and_bands(player_id)
-    if dial is None:
-        return {"ok": False, "error": "no dial row for player"}
-
-    frame, score_preds, team_stats = await load_bundles_for_player(player_id)
-    if frame is None or frame.empty:
-        return {"ok": False, "error": "no assembly bundle — run a full PL projection first"}
-
+def _apply_dials_to_player(frame, mask, dial, model_band, team_stats):
+    """Apply one player's dial columns onto his pure-model rows in frame.
+    Returns the player's new band-derived xMins."""
     d_p_play, d_p60, d_p90, d_goal, d_assist, d_defcon = (_f(x) for x in dial)
-    m_p_play, m_p60, m_p90 = ((_f(x) for x in model_bands) if model_bands
+    m_p_play, m_p60, m_p90 = ((_f(x) for x in model_band) if model_band
                               else (None, None, None))
 
-    mask = frame['player_id'] == player_id
-    if not mask.any():
-        return {"ok": False, "error": "player missing from bundle frame"}
-
-    # --- bands: dial overlays model, monotone chain, band-derived xMins ---
     p_play = d_p_play if d_p_play is not None else (m_p_play if m_p_play is not None else float(frame.loc[mask, 'xmin_p_play'].iloc[0]))
     p60 = d_p60 if d_p60 is not None else (m_p60 if m_p60 is not None else float(frame.loc[mask, 'xmin_p60'].iloc[0]))
     p90 = d_p90 if d_p90 is not None else (m_p90 if m_p90 is not None else float(frame.loc[mask, 'xmin_p90'].iloc[0]))
@@ -77,6 +65,7 @@ async def recalc_fpl_player(player_id: int) -> dict:
     p90 = min(p90, p60)
     new_bands = round(bands_to_xmins(p_play, p60, p90), 1)
 
+    # Count columns are linear in xmin_bands → exact ratio rescale from model.
     old_bands = frame.loc[mask, 'xmin_bands'].astype(float).replace(0, pd.NA)
     ratio = (new_bands / old_bands).fillna(1.0)
     for col in XMIN_SCALED_STAT_COLS:
@@ -88,22 +77,43 @@ async def recalc_fpl_player(player_id: int) -> dict:
     frame.loc[mask, 'xmin_p90'] = round(p90, 4)
     frame.loc[mask, 'xmin_bands'] = new_bands
 
-    # --- share dials: replacement λ = team stat × dial × xmin_bands/90 ---
-    for stat_col, team_key, dial_val in (('Goals', 'Goals', d_goal), ('Assists', 'Assists', d_assist)):
+    # Share dials: replacement λ = team stat projection × dial × xMins/90.
+    for stat_col, dial_val in (('Goals', d_goal), ('Assists', d_assist)):
         if dial_val is None:
             continue
         for idx in frame.index[mask]:
             fid = int(frame.at[idx, 'fixture_id'])
             team = str(frame.at[idx, 'Team'])
-            team_proj = _f((team_stats.get(fid, {}).get(team, {}) or {}).get(team_key), 0.0) or 0.0
+            team_proj = _f((team_stats.get(fid, {}).get(team, {}) or {}).get(stat_col), 0.0) or 0.0
             frame.at[idx, stat_col] = team_proj * dial_val * new_bands / 90.0
 
-    # --- defcon dial: replaces the hit rate ---
     if d_defcon is not None:
         frame.loc[mask, 'CBIT Hit Rate'] = d_defcon
         frame.loc[mask, 'def_con_pct'] = round(d_defcon * 100, 2)
 
-    # --- re-score with the run's own functions ---
+    return new_bands
+
+
+async def recalc_fpl_players(player_ids) -> dict:
+    t0 = time.monotonic()
+    player_ids = [int(p) for p in player_ids]
+    if not player_ids:
+        return {"ok": False, "error": "player_ids required"}
+
+    frame, score_preds, team_stats = await load_bundles_for_players(player_ids)
+    if frame is None or frame.empty:
+        return {"ok": False, "error": "no assembly bundle — run a full PL projection first"}
+
+    dials, model_bands = await load_all_dials_and_bands()
+
+    # Apply EVERY dial whose player appears in the closure (see docstring).
+    applied = 0
+    for pid, dial in dials.items():
+        mask = frame['player_id'] == pid
+        if mask.any():
+            _apply_dials_to_player(frame, mask, dial, model_bands.get(pid), team_stats)
+            applied += 1
+
     frame = frame.reset_index(drop=True)
     pts = get_fpl_points(frame, score_preds, FPL_POINTS_GK, FPL_POINTS_DEF, FPL_POINTS_MID, FPL_POINTS_FWD)
     bps = bonus_points_score(frame, score_preds, FPL_BONUS_GK, FPL_BONUS_DEF, FPL_BONUS_MID, FPL_BONUS_FWD)
@@ -113,20 +123,31 @@ async def recalc_fpl_player(player_id: int) -> dict:
     fpl_df['Bonus Points'] = fpl_df['Bonus Points'].fillna(0)
     fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points']
 
-    mine = fpl_df[fpl_df['player_id'] == player_id]
-    def_con_val = float(frame.loc[mask, 'def_con_pct'].iloc[0]) if 'def_con_pct' in frame.columns else None
+    # Row context (def_con_pct / xmin_bands) back onto the scored rows.
+    ctx = frame[['fixture_id', 'player_id', 'def_con_pct', 'xmin_bands']].drop_duplicates(['fixture_id', 'player_id'])
+    fpl_df = fpl_df.merge(ctx, on=['fixture_id', 'player_id'], how='left')
+
     updates = [
         (round(float(r['FPL Points']), 2), round(float(r['Bonus Points']), 2),
-         def_con_val, new_bands, player_id, int(r['fixture_id']))
-        for _, r in mine.iterrows()
+         _f(r['def_con_pct']), _f(r['xmin_bands']),
+         int(r['player_id']), int(r['fixture_id']))
+        for _, r in fpl_df.iterrows()
+        if pd.notna(r['player_id']) and pd.notna(r['fixture_id'])
     ]
     n = await update_player_fpl_points(updates)
-    # NOTE: no bundle write-back — bundles hold the PURE MODEL frame and every
-    # recalc layers the current dial state on top from scratch, so Reset-to-
-    # model is instant and consecutive edits can't compound (2026-07-30).
 
-    total = round(float(mine['FPL Points'].sum()), 2)
-    logger.info(f"[fpl_recalc] player {player_id}: {n} fixtures updated, "
-                f"bands {p_play:.2f}/{p60:.2f}/{p90:.2f} → xMins {new_bands}, total {total}")
-    return {"ok": True, "player_id": player_id, "fixtures_updated": n,
-            "xmins": new_bands, "points_total": total}
+    edited = fpl_df[fpl_df['player_id'].isin(player_ids)]
+    totals = {int(pid): round(float(g['FPL Points'].sum()), 2)
+              for pid, g in edited.groupby('player_id')}
+    duration = round(time.monotonic() - t0, 1)
+    n_fixtures = int(frame['fixture_id'].nunique())
+    logger.info(f"[fpl_recalc] {len(player_ids)} requested / {applied} dials applied / "
+                f"{n_fixtures} fixtures re-scored / {n} rows updated in {duration}s")
+    return {"ok": True, "requested": player_ids, "dials_applied": applied,
+            "fixtures_rescored": n_fixtures, "rows_updated": n,
+            "points_totals": totals, "duration_seconds": duration}
+
+
+async def recalc_fpl_player(player_id: int) -> dict:
+    """Back-compat single-player wrapper."""
+    return await recalc_fpl_players([int(player_id)])
