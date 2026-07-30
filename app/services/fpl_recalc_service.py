@@ -102,7 +102,14 @@ async def recalc_fpl_players(player_ids) -> dict:
 
     frame, score_preds, team_stats = await load_bundles_for_players(player_ids)
     if frame is None or frame.empty:
-        return {"ok": False, "error": "no assembly bundle — run a full PL projection first"}
+        return {"ok": False, "error": "no assembly bundle — run a full PL projection first",
+                "status": {pid: "no_bundle" for pid in player_ids}}
+    # Per-player status (panel warns on no_bundle): a requested player can
+    # lack bundle rows when he was FPL-mapped after the last full run — the
+    # membership gate (2026-07-30) bundles every mapped player each run, so
+    # this self-heals at the next run.
+    _present = set(frame['player_id'].dropna().astype(int))
+    status = {pid: ("updated" if pid in _present else "no_bundle") for pid in player_ids}
 
     dials, model_bands = await load_all_dials_and_bands()
 
@@ -156,7 +163,8 @@ async def recalc_fpl_players(player_ids) -> dict:
                 f"{n_fixtures} fixtures re-scored / {n} rows updated in {duration}s")
     return {"ok": True, "requested": player_ids, "dials_applied": applied,
             "fixtures_rescored": n_fixtures, "rows_updated": n,
-            "points_totals": totals, "duration_seconds": duration}
+            "points_totals": totals, "status": status,
+            "duration_seconds": duration}
 
 
 async def recalc_fpl_player(player_id: int) -> dict:
