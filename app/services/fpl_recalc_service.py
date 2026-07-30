@@ -136,7 +136,15 @@ async def recalc_fpl_players(player_ids) -> dict:
     ]
     n = await update_player_fpl_points(updates)
 
-    edited = fpl_df[fpl_df['player_id'].isin(player_ids)]
+    # Totals over rows that EXIST in fpl_projections only: bundles span the
+    # full 200-fixture horizon but the FPL insert scopes to the fantasy
+    # gameweek window, so summing every bundle fixture overstated totals
+    # (2026-07-30 verification catch). The UPDATE is a no-op for the extras.
+    from app.repository.fpl_recalc_repo import load_existing_fpl_pairs
+    existing = await load_existing_fpl_pairs(player_ids)
+    edited = fpl_df[fpl_df.apply(
+        lambda r: pd.notna(r['player_id']) and pd.notna(r['fixture_id'])
+        and (int(r['player_id']), int(r['fixture_id'])) in existing, axis=1)]
     totals = {int(pid): round(float(g['FPL Points'].sum()), 2)
               for pid, g in edited.groupby('player_id')}
     duration = round(time.monotonic() - t0, 1)

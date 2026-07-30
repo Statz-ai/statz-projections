@@ -183,3 +183,22 @@ async def update_player_fpl_points(updates):
         if _db.pool:
             _db.pool.release(conn)
     return len(updates)
+
+
+async def load_existing_fpl_pairs(player_ids):
+    """(player_id, fixture_id) pairs that actually exist in fpl_projections
+    for these players — the fantasy-scoped truth the panel reads."""
+    if not player_ids:
+        return set()
+    conn = await get_connection()
+    try:
+        async with conn.cursor() as cur:
+            ph = ",".join(["%s"] * len(player_ids))
+            await cur.execute(
+                f"SELECT player_id, fixture_id FROM fpl_projections WHERE player_id IN ({ph})",
+                tuple(int(p) for p in player_ids),
+            )
+            return {(int(r[0]), int(r[1])) for r in await cur.fetchall()}
+    finally:
+        if _db.pool:
+            _db.pool.release(conn)
