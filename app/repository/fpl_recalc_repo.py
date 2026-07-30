@@ -8,6 +8,7 @@ that snapshot and re-scores with the run's own functions — exact, seconds.
 
 import json
 import logging
+import math
 
 import pandas as pd
 
@@ -38,6 +39,15 @@ SCORE_PRED_COLS = ['id', 'Home Team', 'Away Team', 'Home Goals', 'Away Goals',
 async def save_assembly_bundles(frame, score_preds, team_predictions):
     """Replace all bundles with this run's snapshot (PL-only feature, so a
     full swap is correct: DELETE + insert)."""
+    def _clean(d):
+        # json.dumps emits literal NaN for float('nan') (allow_nan default),
+        # which MySQL's JSON type rejects ("Invalid JSON text ... position
+        # 129") — both 2026-07-30 seeding runs failed on it. NaN -> null.
+        return {
+            k: (None if isinstance(v, float) and math.isnan(v) else v)
+            for k, v in d.items()
+        }
+
     rows = []
     present = [c for c in BUNDLE_COLS if c in frame.columns]
     for rec in frame[present].to_dict('records'):
@@ -46,7 +56,7 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
         if fid is None or pid is None or pd.isna(fid) or pd.isna(pid):
             continue
         rec['kickoff_datetime'] = str(rec.get('kickoff_datetime'))
-        rows.append((int(fid), int(pid), json.dumps(rec, default=str)))
+        rows.append((int(fid), int(pid), json.dumps(_clean(rec), default=str)))
 
     # Context rows: score prediction + team stat projections per fixture.
     team_cols = [c for c in team_predictions.columns if c not in ('fixture_id', 'Team')]
@@ -64,7 +74,7 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
         fid = rec.get('id')
         if fid is None or pd.isna(fid):
             continue
-        ctx = {'score_pred': rec, 'team_stats': tp_by_fix.get(int(fid), {})}
+        ctx = {'score_pred': _clean(rec), 'team_stats': tp_by_fix.get(int(fid), {})}
         rows.append((int(fid), 0, json.dumps(ctx, default=str)))
 
     if not rows:
