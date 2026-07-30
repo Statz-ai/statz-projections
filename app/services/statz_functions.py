@@ -1553,6 +1553,12 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
             .reset_index(drop=True)
         )
 
+    elif stat == 'Expected Assists (xA)':
+        # xA is fractional like xG — the int cast truncated every per-match
+        # value (0.2, 0.4, ...) to ZERO, so xA shares were ~0 for everyone
+        # and the PL assists blend silently degenerated to assists-only
+        # since the feature shipped (found 2026-07-30).
+        player_stats['value'] = player_stats['value'].astype(float)
     else:
         player_stats['value'] = player_stats['value'].astype(int)
     player_stats.rename(columns={'name': 'Game', 'value': f'Player {stat}'}, inplace=True)
@@ -1608,7 +1614,7 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     #    player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)
     #    player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]
 
-    if stat == 'Expected Goals (xG)':  # NEW - moved from above
+    if stat in ('Expected Goals (xG)', 'Expected Assists (xA)'):  # NEW - moved from above; xA fractional too (2026-07-30)
         player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(float)  # NEW
     else:  # NEW
         player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)  # NEW
