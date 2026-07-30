@@ -27,7 +27,7 @@ import pandas as pd
 
 from app.repository.fpl_recalc_repo import (
     load_bundles_for_player, load_player_dial_and_bands,
-    update_player_fpl_points, update_player_bundles,
+    update_player_fpl_points,
 )
 from app.services.fpl_scoring_constants import (
     FPL_POINTS_GK, FPL_POINTS_DEF, FPL_POINTS_MID, FPL_POINTS_FWD,
@@ -121,7 +121,9 @@ async def recalc_fpl_player(player_id: int) -> dict:
         for _, r in mine.iterrows()
     ]
     n = await update_player_fpl_points(updates)
-    await update_player_bundles(frame[frame['player_id'] == player_id], player_id)
+    # NOTE: no bundle write-back — bundles hold the PURE MODEL frame and every
+    # recalc layers the current dial state on top from scratch, so Reset-to-
+    # model is instant and consecutive edits can't compound (2026-07-30).
 
     total = round(float(mine['FPL Points'].sum()), 2)
     logger.info(f"[fpl_recalc] player {player_id}: {n} fixtures updated, "

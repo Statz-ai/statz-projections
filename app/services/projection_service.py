@@ -2016,6 +2016,13 @@ class ProjectionService:
                             await insert_player_bands_async(_xm_profiles, league_id)
                         except Exception as _band_err:
                             logger.warning(f"[{league}] player-bands write failed (non-fatal): {_band_err}")
+                        # Pure-model profile copy for the assembly-bundle
+                        # snapshot below: the recalc path applies CURRENT dial
+                        # state from scratch on a MODEL bundle, so Reset-to-
+                        # model restores instantly with post-edit model values
+                        # (George's invariant, 2026-07-30). Copy BEFORE dials
+                        # mutate the profiles.
+                        _model_profiles = {pid: dict(p) for pid, p in _xm_profiles.items()}
                         # §12 Phase 5: band dials replace standing model bands
                         # AFTER the model-values persist above, BEFORE stamping.
                         # Confirmed-XI snap still wins at fixture level.
@@ -2057,11 +2064,23 @@ class ProjectionService:
                                        f"unscaled points: {_xm_err}", exc_info=True)
                         _fpl_frame = pl_projections
 
-                # Persist the final scoring frame per (player, fixture) —
-                # powers the instant per-player dial recalc (fpl_recalc_service).
+                # Persist a PURE-MODEL scoring frame per (player, fixture) —
+                # model bands, model shares, NO dials, standing (no XI snap).
+                # The recalc path layers current dials on top from scratch,
+                # so Reset-to-model is instant and consecutive edits always
+                # compose from fresh model values (fpl_recalc_service).
                 try:
                     from app.repository.fpl_recalc_repo import save_assembly_bundles
-                    await save_assembly_bundles(_fpl_frame, score_preds, team_projections)
+                    if _xmin_enabled and '_model_profiles' in dir():
+                        _bundle_frame = pl_projections.copy()
+                        _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
+                        if _per90_points_on and _per90_collector:
+                            _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
+                        else:
+                            _bundle_frame = apply_exposure_scaling(_bundle_frame)
+                        _bundle_frame['CBIT Hit Rate'] = _bundle_frame.apply(_td_cbit_hit_rate, axis=1)
+                        _bundle_frame['def_con_pct'] = (_bundle_frame['CBIT Hit Rate'] * 100).round(2)
+                        await save_assembly_bundles(_bundle_frame, score_preds, team_projections)
                 except Exception as _bundle_err:
                     logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
                 fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)

@@ -1530,6 +1530,9 @@ class ProjectionAllTeams:
                                     await insert_player_bands_async(_xm_profiles, league_id)
                                 except Exception as _band_err:
                                     logger.warning(f"[{league}] player-bands write failed (non-fatal): {_band_err}")
+                                # Pure-model copy for the bundle snapshot (see
+                                # single-league path — Reset-to-model invariant).
+                                _model_profiles = {pid: dict(p) for pid, p in _xm_profiles.items()}
                                 # §12 Phase 5: band dials replace standing model
                                 # bands (after model persist, before stamp).
                                 _n_dials = apply_band_dials(_xm_profiles, _fpl_dials)
@@ -1568,10 +1571,22 @@ class ProjectionAllTeams:
                                                f"unscaled points: {_xm_err}", exc_info=True)
                                 _fpl_frame = pl_projections
 
-                        # Assembly-bundle snapshot — mirrors single-league path.
+                        # PURE-MODEL assembly-bundle snapshot — mirrors the
+                        # single-league path (Reset-to-model invariant).
                         try:
                             from app.repository.fpl_recalc_repo import save_assembly_bundles
-                            await save_assembly_bundles(_fpl_frame, score_preds, team_projections)
+                            if '_model_profiles' in dir():
+                                _bundle_frame = pl_projections.copy()
+                                _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
+                                if (os.getenv("FPL_PER90_POINTS", "1") == "1") and _per90_collector:
+                                    _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
+                                else:
+                                    _bundle_frame = apply_exposure_scaling(_bundle_frame)
+                                if 'CBIT Hit Rate' in _bundle_frame.columns:
+                                    _bundle_frame['CBIT Hit Rate'] = (
+                                        _bundle_frame['CBIT Hit Rate'] * _bundle_frame['xmin_exposure']
+                                    )
+                                await save_assembly_bundles(_bundle_frame, score_preds, team_projections)
                         except Exception as _bundle_err:
                             logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
                         fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
