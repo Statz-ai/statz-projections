@@ -1439,8 +1439,6 @@ class ProjectionAllTeams:
                         # FPL position from fpl_player_mappings (joined by
                         # player_id) — see projection_service.py for the
                         # rationale. xlsx still loaded for FanTeam below.
-                        fpl_file = os.path.join(data_folder_path, "PL Fantasy Players.xlsx")
-                        pl_players = pd.read_excel(fpl_file)
                         pl_projections['Player'] = pl_projections['Player'].str.strip()
                         fpl_mappings = ProjectionService._current_source.fpl_player_mappings
                         if fpl_mappings is None or fpl_mappings.empty:

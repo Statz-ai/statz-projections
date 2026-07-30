@@ -1881,8 +1881,6 @@ class ProjectionService:
                 # no more fragile string matches on accents/initials/etc.
                 # The xlsx is still used by the FanTeam block below for
                 # FanTeam Position (which isn't in fpl_player_mappings).
-                fpl_file = os.path.join(data_folder_path, "PL Fantasy Players.xlsx")
-                pl_players = pd.read_excel(fpl_file)
                 pl_projections['Player'] = pl_projections['Player'].str.strip()
                 fpl_mappings = ProjectionService._current_source.fpl_player_mappings
                 if fpl_mappings is None or fpl_mappings.empty:
