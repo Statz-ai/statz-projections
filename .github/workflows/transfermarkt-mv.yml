@@ -1,13 +1,19 @@
 name: Transfermarkt market values
 
-# Weekly refresh of transfermarkt_market_value_snapshots from GitHub egress
-# IPs — the prod server's IP is AWS-WAF-challenged (HTTP 202) since Jul 2026.
-# Manual dispatch for pre-season refreshes (new promoted teams land on the
-# TM pages in early July).
+# Refreshes transfermarkt_market_value_snapshots from GitHub egress IPs — the
+# prod server's IP is AWS-WAF-challenged (HTTP 202) since Jul 2026, so this
+# must NOT be moved onto the projection box.
+#
+# Cadence (George, 2026-07-30): squad value is now a weighted component of the
+# Team Strength rating behind the outrights page — 10% normally and 30% for
+# promoted sides — so it needs to track the transfer windows rather than drift
+# a week behind them. Daily through the summer and January windows, weekly the
+# rest of the year. Manual dispatch any time.
 
 on:
   schedule:
-    - cron: '43 5 * * 1'   # Mondays 05:43 UTC — odd minute, politer than :00
+    - cron: '43 5 * * 1'          # Mondays 05:43 UTC — odd minute, politer than :00
+    - cron: '43 5 * 1,7,8 *'      # daily in January, July and August (transfer windows)
   workflow_dispatch:
 
 jobs:
