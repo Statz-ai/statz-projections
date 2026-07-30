@@ -1459,9 +1459,21 @@ class ProjectionAllTeams:
                             _existing_ids = set(pl_projections['player_id'].dropna().astype(int))
                             _missing_ids = _mapped_ids - _existing_ids
                             if _missing_ids:
+                                # FPL club overrides stale current_team_id for
+                                # the extras pass — mirrors single-league path.
+                                _players_fpl = players.copy()
+                                if 'fpl_club_team_id' in fpl_mappings.columns:
+                                    _club_by_pid = (fpl_mappings.dropna(subset=['fpl_club_team_id'])
+                                                    .drop_duplicates('player_id')
+                                                    .set_index('player_id')['fpl_club_team_id'])
+                                    _fix_mask = _players_fpl['id'].isin(_missing_ids)
+                                    _players_fpl.loc[_fix_mask, 'current_team_id'] = (
+                                        _players_fpl.loc[_fix_mask, 'id'].map(_club_by_pid)
+                                        .fillna(_players_fpl.loc[_fix_mask, 'current_team_id'])
+                                    )
                                 _fpl_extras = distribute_team_predictions_to_players(
                                     player_stats, team_stats, team_projections, stats_types,
-                                    fixtures_df, players, teams, comps, 0.97,
+                                    fixtures_df, _players_fpl, teams, comps, 0.97,
                                     season_id=[current_season_id, previous_season_id,
                                                previous_season_id_above, previous_season_id_below],
                                     competition_id=league_id, comp_teams=comp_teams,

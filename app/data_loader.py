@@ -982,9 +982,11 @@ class LeagueDataLoader:
         self.fpl_player_mappings = await self._sql_to_df(
             conn,
             """
-            SELECT player_id, fpl_id, fpl_code, fpl_element_type,
-                   fpl_first_name, fpl_second_name, fpl_web_name
-            FROM fpl_player_mappings
+            SELECT m.player_id, m.fpl_id, m.fpl_code, m.fpl_element_type,
+                   m.fpl_first_name, m.fpl_second_name, m.fpl_web_name,
+                   ftm.team_id AS fpl_club_team_id
+            FROM fpl_player_mappings m
+            LEFT JOIN fpl_team_mappings ftm ON ftm.fpl_id = m.fpl_team_id
             """,
         )
 
