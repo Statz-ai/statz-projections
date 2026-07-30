@@ -1657,6 +1657,21 @@ class ProjectionAllTeams:
                         await insert_fpl_projections_async(fpl_df)
                         from app.repository.fpl_repo import prune_stale_fpl_rows
                         await prune_stale_fpl_rows()
+                        # Post-run dial true-up (2026-07-30): the run read dials at
+                        # DATA-LOAD time, so a dial saved mid-run gets clobbered by
+                        # the insert above. Re-read dials fresh and recalc all dialed
+                        # players from the just-written bundles — a run can then never
+                        # change a dialed player's points except through his dials.
+                        try:
+                            from app.repository.fpl_recalc_repo import load_all_dials_and_bands
+                            from app.services.fpl_recalc_service import recalc_fpl_players
+                            _dials_now, _ = await load_all_dials_and_bands()
+                            if _dials_now:
+                                _tu = await recalc_fpl_players(list(_dials_now.keys()))
+                                logger.info(f"[{league}] post-run dial true-up: "
+                                            f"{_tu.get('rows_updated')} rows in {_tu.get('duration_seconds')}s")
+                        except Exception as _tu_err:
+                            logger.warning(f"[{league}] post-run dial true-up failed (non-fatal): {_tu_err}")
                         logger.info(f"[{league}] FPL projections inserted ({time.time()-_t:.1f}s)")
                     except Exception as e:
                         logger.warning(f"[{league}] FPL computation failed (skipping): {e}", exc_info=True)
