@@ -23,6 +23,37 @@ async def insert_per90_shares_async(rows: list, competition_id: int):
     if not rows:
         return 0
 
+    # Synthesize the EFFECTIVE (blended) goal/assist shares — the numbers
+    # assembly actually uses (George, 2026-07-30): Goals blends with xG,
+    # Assists with xA (PL), per distribute's stat_prop logic. The panel's
+    # share sliders baseline on these rows; the raw per-stat rows stay for
+    # display/analysis. share90-equivalent uses the BASE stat's m_bar (the
+    # per-90 scaling divides by the Goals/Assists m_bar at assembly).
+    by_key = {(r['player_id'], r['stat_name']): r for r in rows}
+    blended = []
+    for (pid, stat), base in list(by_key.items()):
+        if stat == 'Goals':
+            partner = by_key.get((pid, 'Expected Goals (xG)'))
+            out_name = 'Goals (blended)'
+        elif stat == 'Assists':
+            partner = by_key.get((pid, 'Expected Assists (xA)'))
+            out_name = 'Assists (blended)'
+        else:
+            continue
+        if base.get('m_bar') is None or base.get('share90') is None:
+            continue
+        sl_base = float(base['share_legacy'])
+        sl_partner = float(partner['share_legacy']) if partner and partner.get('share_legacy') is not None else 0.0
+        eff_legacy = (sl_base + sl_partner) / 2 if sl_partner > 0 else sl_base
+        blended.append({
+            'player_id': pid, 'stat_name': out_name,
+            'share_legacy': eff_legacy,
+            'share90': eff_legacy * 90.0 / float(base['m_bar']),
+            'm_bar': base['m_bar'], 'n_games': base['n_games'],
+            'series': base.get('series') or [],
+        })
+    rows = list(rows) + blended
+
     values = []
     for r in rows:
         if r.get('share90') is None or r.get('m_bar') is None:
