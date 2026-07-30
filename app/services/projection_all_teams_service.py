@@ -1454,6 +1454,7 @@ class ProjectionAllTeams:
                         # FPL gate = FPL membership (George, 2026-07-30) — mirrors the
                         # single-league path. FPL-LOCAL only.
                         _fpl_extras = None
+                        _p90_mark = len(_per90_collector) if _per90_collector is not None else 0
                         try:
                             _mapped_ids = set(fpl_mappings['player_id'].dropna().astype(int))
                             _existing_ids = set(pl_projections['player_id'].dropna().astype(int))
@@ -1542,6 +1543,15 @@ class ProjectionAllTeams:
                                 pl_projections.loc[:, _col] = 0
 
                         # ---- xMinutes (mirrors projection_service.py) ----
+                        # per90 rows for the EXTRAS were collected AFTER the early insert
+                        # ran (post-main-distribute) — Kudus-class players computed shares
+                        # that never persisted (found 2026-07-30). Upsert the new slice.
+                        if _per90_collector is not None and len(_per90_collector) > _p90_mark:
+                            try:
+                                from app.repository.fpl_per90_repo import insert_per90_shares_async
+                                await insert_per90_shares_async(_per90_collector[_p90_mark:], league_id)
+                            except Exception as _p90x_err:
+                                logger.warning(f"[{league}] extras per90 write failed (non-fatal): {_p90x_err}")
                         _fpl_base = (pd.concat([pl_projections, _fpl_extras], ignore_index=True)
                                      if _fpl_extras is not None and len(_fpl_extras) else pl_projections)
                         for _c in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average', 'Tackles Won Average', 'Full Match Hit Rate', 'def_con_pct']:
