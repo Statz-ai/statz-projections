@@ -1770,7 +1770,7 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                                            teams, comps, weight, season_id=None, competition_id=None, comp_teams=None,
                                            confirmed_lineups=None,
                                            odds_for_fixture_players=None, odds_blend_weight=0.3,
-                                           per90_collector=None):
+                                           per90_collector=None, only_player_ids=None):
     """
     confirmed_lineups: optional {(fixture_id, team_id): set(player_id)} — when
     a key exists for the (fixture, team) being projected, restrict the
@@ -1829,6 +1829,14 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
         team_id = get_team_id(team, teams, competition_id, comp_teams)
         # team_stat_values = row[1].values
         team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
+        # only_player_ids (2026-07-30, George: "for premier league we should
+        # map all players in FPL, that should be the gate"): second-pass mode
+        # that projects EXACTLY these players and bypasses player_criteria —
+        # used by the FPL branch to add FPL-mapped squad players the
+        # appearance gate excludes (backup GKs etc.). xMins prices their
+        # minutes honestly, so per-start shares are safe to compute.
+        if only_player_ids is not None:
+            team_players = team_players[team_players['id'].isin(only_player_ids)]
 
         # Integration ramp (George, 2026-07-23): this club's fixture ids, used
         # below to count each player's appearances FOR THIS CLUB. New joiners
@@ -1864,7 +1872,7 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
         for name, id in team_players[['display_name', 'id']].values:
             # player_pred_stats = {}
             # UPDATED - New Parameter: season_id and we can now use team
-            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams,
+            if only_player_ids is not None or player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams,
                                in_confirmed_xi=int(id) in _player_in_any_xi):
                 # Integration ramp: min(1.0, 0.75 + 0.05 × apps-for-this-club).
                 # 0 club apps → 0.75, full value from the 5th club game.

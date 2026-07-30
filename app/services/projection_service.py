@@ -1895,6 +1895,51 @@ class ProjectionService:
                 )
                 pl_projections['FPL Position'] = pl_projections['player_id'].map(_pos_by_pid)
 
+                # FPL gate = FPL membership (George, 2026-07-30): every
+                # FPL-mapped squad player gets FPL rows even when the
+                # appearance gate (player_criteria) excluded him — backup
+                # GKs, deep bench. Second distribute pass for the missing
+                # ids only; xMins prices their minutes so per-start shares
+                # are safe. FPL-LOCAL: extras join _fpl_frame below, never
+                # pl_projections — props/Opta/site paths keep the old gate.
+                _fpl_extras = None
+                try:
+                    _mapped_ids = set(fpl_mappings['player_id'].dropna().astype(int))
+                    _existing_ids = set(pl_projections['player_id'].dropna().astype(int))
+                    _missing_ids = _mapped_ids - _existing_ids
+                    if _missing_ids:
+                        _fpl_extras = distribute_team_predictions_to_players(
+                            player_stats, team_stats, team_projections, stats_types,
+                            fixtures_df, players, teams, comps, 0.97,
+                            season_id=[current_season_id, previous_season_id,
+                                       previous_season_id_above, previous_season_id_below],
+                            competition_id=league_id, comp_teams=comp_teams,
+                            per90_collector=_per90_collector,
+                            only_player_ids=_missing_ids)
+                        if _fpl_extras is not None and len(_fpl_extras):
+                            _fpl_extras['FPL Position'] = _fpl_extras['player_id'].map(_pos_by_pid)
+                            _fpl_extras = _fpl_extras[_fpl_extras['FPL Position'].notna()]
+                            # GK extras take the team's saves projection,
+                            # mirroring the main path's GK assignment.
+                            _ts = team_projections[['fixture_id', 'Team', 'Saves']].rename(columns={'Saves': '_tgs'})
+                            _fpl_extras = _fpl_extras.merge(_ts, on=['fixture_id', 'Team'], how='left')
+                            if 'Saves' not in _fpl_extras.columns:
+                                _fpl_extras['Saves'] = 0.0
+                            _gk_m = _fpl_extras['FPL Position'] == 'GK'
+                            _fpl_extras.loc[_gk_m, 'Saves'] = _fpl_extras.loc[_gk_m, '_tgs'].fillna(0)
+                            _fpl_extras.drop(columns=['_tgs'], inplace=True)
+                            for _c in pl_projections.columns:
+                                if _c not in _fpl_extras.columns:
+                                    _fpl_extras[_c] = 0
+                            _fpl_extras = _fpl_extras[list(pl_projections.columns)]
+                            logger.info(f"[{league}] FPL gate-bypass: {_fpl_extras['player_id'].nunique()} "
+                                        f"FPL-mapped players added to the FPL frame")
+                except Exception as _extras_err:
+                    logger.warning(f"[{league}] FPL extras pass failed (non-fatal): {_extras_err}")
+                    _fpl_extras = None
+                _fpl_base = (pd.concat([pl_projections, _fpl_extras], ignore_index=True)
+                             if _fpl_extras is not None and len(_fpl_extras) else pl_projections)
+
                 # Compute extra stats per player (Clearances, Blocked Shots, Ball Recovery averages)
                 for _col in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average',
                              'Ball Recovery Average', 'Tackles Won Average', 'Full Match Hit Rate']:
@@ -1989,7 +2034,7 @@ class ProjectionService:
                 # Admin dials (§12 Phase 5) — standing per-player overrides,
                 # loaded via the same DB-source pattern as promoted ratings.
                 _fpl_dials = getattr(ProjectionService._current_source, 'fpl_player_dials', None)
-                _fpl_frame = pl_projections
+                _fpl_frame = _fpl_base
                 if _xmin_enabled:
                     try:
                         _t_xm = time.time()
@@ -1997,10 +2042,10 @@ class ProjectionService:
                         _xm_minutes = build_minutes_frame(player_stats, _xm_past_fx)
                         _xm_team_ids = {
                             _tn: get_team_id(_tn, teams, league_id, comp_teams)
-                            for _tn in pl_projections['Team'].unique()
+                            for _tn in _fpl_base['Team'].unique()
                         }
                         _xm_profiles = {}
-                        for _xm_pid, _xm_tname, _xm_pos in pl_projections[
+                        for _xm_pid, _xm_tname, _xm_pos in _fpl_base[
                                 ['player_id', 'Team', 'FPL Position']
                         ].drop_duplicates('player_id').itertuples(index=False):
                             if pd.isna(_xm_pid):
@@ -2030,7 +2075,7 @@ class ProjectionService:
                         _n_dials = apply_band_dials(_xm_profiles, _fpl_dials)
                         if _n_dials:
                             logger.info(f"[{league}] FPL dials: bands replaced for {_n_dials} players")
-                        _fpl_frame = pl_projections.copy()
+                        _fpl_frame = _fpl_base.copy()
                         _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                         confirmed_xi=_confirmed_lineups)
                         if _per90_points_on and _per90_collector:
@@ -2063,7 +2108,7 @@ class ProjectionService:
                         # to the legacy unscaled frame and flag it loudly.
                         logger.warning(f"[{league}] FPL xMinutes failed — falling back to "
                                        f"unscaled points: {_xm_err}", exc_info=True)
-                        _fpl_frame = pl_projections
+                        _fpl_frame = _fpl_base
 
                 # Persist a PURE-MODEL scoring frame per (player, fixture) —
                 # model bands, model shares, NO dials, standing (no XI snap).
@@ -2073,7 +2118,7 @@ class ProjectionService:
                 try:
                     from app.repository.fpl_recalc_repo import save_assembly_bundles
                     if _xmin_enabled and '_model_profiles' in dir():
-                        _bundle_frame = pl_projections.copy()
+                        _bundle_frame = _fpl_base.copy()
                         _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
                         if _per90_points_on and _per90_collector:
                             _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
