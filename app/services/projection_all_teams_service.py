@@ -357,10 +357,10 @@ class ProjectionAllTeams:
                 total_matches = (season_fixtures['home_team_id'].value_counts() + season_fixtures[
                     'away_team_id'].value_counts()).mean().round(
                     0)  # NEW - This calculates the total number of matches in the season
-                if league == 'League Two':
-                    previous_season_id_below = 23846
-                else:
-                    previous_season_id_below = get_season_id(league_below_id, seasons, True) if league_below_id else None
+                # See projection_service._setup_league — the League Two pin
+                # to 23846 (National League 2024/25) went stale at the season
+                # rollover and is resolved normally now.
+                previous_season_id_below = get_season_id(league_below_id, seasons, True) if league_below_id else None
                 previous_season_id_above = get_season_id(league_above_id, seasons, True) if league_above_id else None
                 stat_list = get_stat_list(league_id)
 

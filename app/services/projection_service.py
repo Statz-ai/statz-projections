@@ -380,10 +380,16 @@ class ProjectionService:
         ctx.total_matches = (ctx.season_fixtures['home_team_id'].value_counts() +
                              ctx.season_fixtures['away_team_id'].value_counts()).mean().round(0)
 
-        if league == 'League Two':
-            ctx.previous_season_id_below = 23846
-        else:
-            ctx.previous_season_id_below = get_season_id(ctx.league_below_id, ctx.seasons, True) if ctx.league_below_id else None
+        # League Two used to pin this to 23846 (National League 2024/25).
+        # That was correct while 2025/26 was live and then silently went
+        # stale at the rollover: this season's promotees (Rochdale, York)
+        # were being rated on National League form from TWO seasons ago,
+        # while the teams the pinned season did cover (Barnet, Oldham) had
+        # a full League Two season of their own by then. Resolve it like
+        # every other league — verified 2026-08-02 to return 25752
+        # (National League 2025/26), which is the season the current
+        # promotees actually played in.
+        ctx.previous_season_id_below = get_season_id(ctx.league_below_id, ctx.seasons, True) if ctx.league_below_id else None
         ctx.previous_season_id_above = get_season_id(ctx.league_above_id, ctx.seasons, True) if ctx.league_above_id else None
 
         ctx.stat_list = get_stat_list(ctx.league_id)
