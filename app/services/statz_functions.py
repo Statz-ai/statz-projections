@@ -1121,7 +1121,17 @@ def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_typ
                               as_of=None):
     team_stats_df = get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue,
                                             comp_id, season_id, games, comp_teams=comp_teams, as_of=as_of)
-    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
+    # Stats that get the cross-league adjustments: the promoted/relegated
+    # league_weightings blend below, and the attack-rating scaling in the
+    # thin-history fallback. Key Passes + Big Chances Created added
+    # 2026-08-02 (George): a promoted side's Championship key passes were
+    # counted at face value while their shots were discounted, so key
+    # passes ran high relative to shots for exactly those teams. PL-only in
+    # effect — get_stat_list(comp_id) only emits these two for competition 8,
+    # and the only other caller (get_simple_team_stat_prediction) passes just
+    # Ball Recovery / CBI(FPL).
+    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses',
+                 'Key Passes', 'Big Chances Created']
     if league_weightings is not None:
         if stat in stat_list:
             league_weightings[2] = (1 - league_weightings[2]) * 0.25 + league_weightings[2]
@@ -1166,7 +1176,17 @@ def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_type
                              as_of=None):
     team_stats_df = get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue, comp_id,
                                            season_id, games, comp_teams=comp_teams, as_of=as_of)
-    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
+    # Stats that get the cross-league adjustments: the promoted/relegated
+    # league_weightings blend below, and the attack-rating scaling in the
+    # thin-history fallback. Key Passes + Big Chances Created added
+    # 2026-08-02 (George): a promoted side's Championship key passes were
+    # counted at face value while their shots were discounted, so key
+    # passes ran high relative to shots for exactly those teams. PL-only in
+    # effect — get_stat_list(comp_id) only emits these two for competition 8,
+    # and the only other caller (get_simple_team_stat_prediction) passes just
+    # Ball Recovery / CBI(FPL).
+    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses',
+                 'Key Passes', 'Big Chances Created']
     if league_weightings is not None:
         if stat in stat_list:
             league_weightings[3] = (1 - league_weightings[2]) * 0.25 + league_weightings[3]
