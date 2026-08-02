@@ -30,7 +30,7 @@ sys.path.insert(0, "/app")
 
 import pandas as pd
 
-from app.database import get_connection
+from app.database import get_connection, init_db_pool, close_db_pool
 import app.database as _db
 from app.repository.db_utils import execute_chunked
 from app.services.statz_functions import get_team_stat_histories
@@ -249,10 +249,14 @@ async def main():
     args = ap.parse_args()
 
     leagues = {args.comp: TOP5.get(args.comp, str(args.comp))} if args.comp else TOP5
-    grand = 0
-    for cid, label in leagues.items():
-        grand += await backfill_league(cid, label, dry_run=args.dry_run, limit=args.limit)
-    logger.info(f"TOTAL feature pairs: {grand}{' (dry run — nothing written)' if args.dry_run else ''}")
+    await init_db_pool()
+    try:
+        grand = 0
+        for cid, label in leagues.items():
+            grand += await backfill_league(cid, label, dry_run=args.dry_run, limit=args.limit)
+        logger.info(f"TOTAL feature pairs: {grand}{' (dry run — nothing written)' if args.dry_run else ''}")
+    finally:
+        await close_db_pool()
 
 
 if __name__ == "__main__":
