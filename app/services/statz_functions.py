@@ -2200,10 +2200,11 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
     fpl_points_df['Opponent'] = pl_projections['Opponent'].tolist()
     fpl_points_df['Venue'] = pl_projections['Venue'].tolist()
     # xMinutes: when the caller stamped xmin_p_play/xmin_p60 (FPL_XMINUTES on),
-    # appearance points and the 60-minute-gated components (clean sheet, goals
-    # conceded, pen saves) stop assuming a 90-minute start. Absent columns ->
-    # both default to 1.0 and the output is identical to pre-xMinutes.
+    # appearance points and the genuinely 60-minute-gated component (clean
+    # sheet) stop assuming a 90-minute start. Absent columns -> everything
+    # defaults to a full 90 and the output is identical to pre-xMinutes.
     _has_xmin = 'xmin_p_play' in pl_projections.columns and 'xmin_p60' in pl_projections.columns
+    _has_bands = _has_xmin and 'xmin_bands' in pl_projections.columns
     for i in range(len(pl_projections)):
         fixture_id = pl_projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
@@ -2214,6 +2215,11 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
         else:
             _p_play = 1.0
             _p60 = 1.0
+        # Share of the match he is on the pitch for. Goals conceded and penalty
+        # saves accrue per event while he plays and carry NO 60' threshold
+        # (that rule is clean-sheet-only), so they scale by exposure, not by
+        # p60. George, 2026-08-02.
+        _exposure = min(1.0, float(pl_projections['xmin_bands'][i]) / 90.0) if _has_bands else 1.0
         if position == 'GK':
             fpl_points_dict = fpl_points_dict_gk
         elif position == 'DEF':
@@ -2239,13 +2245,15 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
                                                                                                             fix_score_pred[
                                                                                                                 'Home Team'].values else \
             fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
-            goal_conceded_points = (poisson.pmf(2, goals_conceded) + poisson.pmf(3, goals_conceded) + (
-                        (poisson.pmf(4, goals_conceded) + poisson.pmf(5, goals_conceded)) * 2) + (
-                                                poisson.pmf(6, goals_conceded) + poisson.pmf(7, goals_conceded)) * 3) * \
-                                   fpl_points_dict['Goals Conceded'] if goals_conceded > 0 else 0
-            # xMinutes: goals-conceded docks track time on pitch (paired with
-            # the 60' threshold like clean sheets).
-            goal_conceded_points *= _p60
+            # He can only concede while he is on the pitch, so the EXPOSURE
+            # scales the rate that goes into the Poisson — not the answer that
+            # comes out. The dock is floor(GC/2), which is non-linear, so
+            # scaling the result over-charges (~7% at lam 1.4, exposure 0.85).
+            _gc_lambda = goals_conceded * _exposure
+            goal_conceded_points = (poisson.pmf(2, _gc_lambda) + poisson.pmf(3, _gc_lambda) + (
+                        (poisson.pmf(4, _gc_lambda) + poisson.pmf(5, _gc_lambda)) * 2) + (
+                                                poisson.pmf(6, _gc_lambda) + poisson.pmf(7, _gc_lambda)) * 3) * \
+                                   fpl_points_dict['Goals Conceded'] if _gc_lambda > 0 else 0
         else:
             goal_conceded_points = 0
         if 'Clean Sheet' in fpl_points_dict:
@@ -2257,7 +2265,10 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
         else:
             clean_sheet_points = 0
         if 'Penalties Saved' in fpl_points_dict:
-            pen_save_points = (0.1 * goals_conceded) * 0.16 * fpl_points_dict['Penalties Saved'] * _p60
+            # A penalty can only be faced while he is on the pitch — no 60'
+            # gate here either, so exposure not p60. Linear in goals_conceded,
+            # so scaling the result is exact. George, 2026-08-02.
+            pen_save_points = (0.1 * goals_conceded) * 0.16 * fpl_points_dict['Penalties Saved'] * _exposure
         else:
             pen_save_points = 0
         cbit_points = pl_projections['CBIT Hit Rate'][i] * 2
@@ -2287,14 +2298,17 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
     fpl_bonus_df['Opponent'] = projections['Opponent'].tolist()
     fpl_bonus_df['Venue'] = projections['Venue'].tolist()
     # xMinutes: the count-shaped columns arrive pre-scaled by exposure on the
-    # FPL-local frame; only the team-derived 60-minute-gated terms (clean
-    # sheet, goals conceded) need explicit p60 weighting here.
+    # FPL-local frame. Two team-derived terms need explicit weighting here and
+    # they take DIFFERENT weights: clean sheet is a genuine 60' threshold (p60),
+    # goals conceded is per-event-while-on-pitch (exposure = xMins/90).
     _has_xmin = 'xmin_p60' in projections.columns
+    _has_bands = 'xmin_bands' in projections.columns
     for i in range(len(projections)):
         fixture_id = projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
         position = projections['FPL Position'][i]
         _p60 = float(projections['xmin_p60'][i]) if _has_xmin else 1.0
+        _exposure = min(1.0, float(projections['xmin_bands'][i]) / 90.0) if _has_bands else 1.0
         if position == 'GK':
             fpl_bonus_dict = fpl_bonus_dict_gk
         elif position == 'DEF':
@@ -2329,7 +2343,10 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
                                                                                                             fix_score_pred[
                                                                                                                 'Home Team'].values else \
             fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
-            goal_conceded_points = (goals_conceded * fpl_bonus_dict['Goals Conceded'] if goals_conceded > 0 else 0) * _p60
+            # -4 BPS per goal conceded WHILE ON THE PITCH — no 60' gate, so
+            # exposure not p60. Linear in goals, so scaling the answer is exact
+            # here (unlike the points path's floor(GC/2)). George, 2026-08-02.
+            goal_conceded_points = (goals_conceded * fpl_bonus_dict['Goals Conceded'] if goals_conceded > 0 else 0) * _exposure
         else:
             goal_conceded_points = 0
         if 'Clean Sheet' in fpl_bonus_dict:
