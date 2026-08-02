@@ -47,6 +47,29 @@ STATS = [("Key Passes", "key_passes"), ("Big Chances Created", "big_chances_crea
 # Matches the live call in projection_service.get_team_round_predictions.
 GAMES = 50
 
+# Actuals. Two statements per stat because Sportmonks stores no zero rows: a
+# match where neither side created a big chance has no row at all, and leaving
+# those NULL would drop exactly the low-event fixtures from the training sample.
+# `team_stats_imported = 1` is the guard that separates "genuinely zero" from
+# "not ingested yet".
+ACTUALS_COPY_SQL = """
+UPDATE projection_model_dataset d
+  JOIN fixture_team_stats s
+    ON s.fixture_id = d.fixture_id AND s.team_id = d.team_id AND s.stats_type_id = %s
+   SET d.team_{col} = s.value, d.updated_at = NOW()
+ WHERE d.competition_id = %s AND d.team_{col} IS NULL
+"""
+
+ACTUALS_ZERO_SQL = """
+UPDATE projection_model_dataset d
+  JOIN fixtures f ON f.id = d.fixture_id
+   SET d.team_{col} = 0, d.updated_at = NOW()
+ WHERE d.competition_id = %s
+   AND d.team_{col} IS NULL
+   AND f.state_id = 5
+   AND f.team_stats_imported = 1
+"""
+
 UPDATE_SQL_TEMPLATE = """
 UPDATE projection_model_dataset
    SET team_{col}_history = %s,
@@ -109,10 +132,45 @@ async def load_league(comp_id):
     return fixtures, team_stats, teams, stats_types, comp_teams
 
 
+async def _execute(sql, params):
+    conn = None
+    try:
+        conn = await asyncio.wait_for(get_connection(), timeout=120)
+        async with conn.cursor() as cur:
+            n = await cur.execute(sql, params)
+        await conn.commit()
+        return n
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
+async def backfill_actuals(comp_id, label, stat_ids, dry_run=False):
+    """Copy the played values in. No point-in-time concern — an actual is just
+    what happened."""
+    for stat, col in STATS:
+        sid = int(stat_ids[stat])
+        if dry_run:
+            probe = await _fetch(
+                f"""SELECT COUNT(*) n FROM projection_model_dataset d
+                      JOIN fixture_team_stats s ON s.fixture_id = d.fixture_id
+                       AND s.team_id = d.team_id AND s.stats_type_id = %s
+                     WHERE d.competition_id = %s AND d.team_{col} IS NULL""",
+                (sid, comp_id))
+            logger.info(f"[{label}] DRY RUN actuals {col}: would copy {int(probe['n'].iloc[0])}")
+            continue
+        copied = await _execute(ACTUALS_COPY_SQL.format(col=col), (sid, comp_id))
+        zeroed = await _execute(ACTUALS_ZERO_SQL.format(col=col), (comp_id,))
+        logger.info(f"[{label}] actuals {col}: copied={copied} zeroed={zeroed}")
+
+
 async def backfill_league(comp_id, label, dry_run=False, limit=None):
     t0 = time.time()
     fixtures, team_stats, teams, stats_types, comp_teams = await load_league(comp_id)
     logger.info(f"[{label}] fixtures={len(fixtures)} team_stat_rows={len(team_stats)}")
+
+    stat_ids = dict(zip(stats_types["name"], stats_types["id"]))
+    await backfill_actuals(comp_id, label, stat_ids, dry_run=dry_run)
 
     # Rows needing features. Restricting to played fixtures: an unplayed row's
     # features get written by the next projection run anyway.
