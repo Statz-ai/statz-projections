@@ -121,6 +121,19 @@ def get_stat_list(comp_id=None):
     return stats
 
 
+def accuracy_stat_list(stat_list):
+    """Stats that have accuracy columns — i.e. the base list, PL extras removed.
+
+    projection_accuracy_dataset deliberately has no columns for the PL-only
+    stats (Laravel's BackfillFixtureAccuracy makes the same call via
+    MODEL_ONLY_STAT_MAP): they are not projected outside the PL, so accuracy
+    tracking for them would be permanently empty. The accuracy blocks iterate
+    stat_list, so without this the first PL run after adding a stat dies on
+    KeyError: 'Total Projected Key Passes'. George, 2026-08-02.
+    """
+    return [s for s in stat_list if s not in PL_ONLY_STATS]
+
+
 def get_trainable_stat_list():
     """Every stat that needs a model file — the union across competitions.
 

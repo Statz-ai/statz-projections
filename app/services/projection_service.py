@@ -518,8 +518,8 @@ class ProjectionService:
                 projection_accuracy_dataset_league_copy['Total Passes'] > 0]
             projection_accuracy_dataset_league_copy.reset_index(drop=True, inplace=True)
             accuracy_df_league = pd.DataFrame(
-                [summarize(projection_accuracy_dataset_league_copy, stat) for stat in stat_list])
-            accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in stat_list])
+                [summarize(projection_accuracy_dataset_league_copy, stat) for stat in accuracy_stat_list(stat_list)])
+            accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in accuracy_stat_list(stat_list)])
             accuracy_df_league = accuracy_df_league.round(2)
             accuracy_df_all = accuracy_df_all.round(2)
 
@@ -532,7 +532,7 @@ class ProjectionService:
             logger.info(f"[{league}] Step: projection accuracy saved")
             ## THIS IS ALL NEW - ADD ABSOLUTE ERROR COLUMNS TO ACCURACY DATASET
 
-            for stat in stat_list:
+            for stat in accuracy_stat_list(stat_list):
                 # Calculate absolute errors
                 for prefix in ['Total', 'Home', 'Away']:
                     abs_err_col = f"{prefix} {stat} Absolute Error"
@@ -1576,7 +1576,7 @@ class ProjectionService:
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + [c for c in stat_list if c != 'Key Passes'] + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
 
@@ -3644,7 +3644,7 @@ class ProjectionService:
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + [c for c in stat_list if c != 'Key Passes'] + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
 
@@ -4304,7 +4304,7 @@ class ProjectionService:
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + [c for c in stat_list if c != 'Key Passes'] + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
 
@@ -5120,7 +5120,7 @@ class ProjectionService:
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + [c for c in stat_list if c != 'Key Passes'] + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
 

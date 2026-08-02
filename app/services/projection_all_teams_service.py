@@ -440,8 +440,8 @@ class ProjectionAllTeams:
                     projection_accuracy_dataset_league_copy['Total Passes'] > 0]
                 projection_accuracy_dataset_league_copy.reset_index(drop=True, inplace=True)
                 accuracy_df_league = pd.DataFrame(
-                    [summarize(projection_accuracy_dataset_league_copy, stat) for stat in stat_list])
-                accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in stat_list])
+                    [summarize(projection_accuracy_dataset_league_copy, stat) for stat in accuracy_stat_list(stat_list)])
+                accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in accuracy_stat_list(stat_list)])
                 accuracy_df_league = accuracy_df_league.round(2)
                 accuracy_df_all = accuracy_df_all.round(2)
                 # accuracy_df_league.to_csv(rf"{data_folder_path}\{league} Projection Accuracy.csv", index=False)
@@ -457,7 +457,7 @@ class ProjectionAllTeams:
                 logger.info(f"[{league}] Step: projection accuracy saved")
                 ## THIS IS ALL NEW - ADD ABSOLUTE ERROR COLUMNS TO ACCURACY DATASET
 
-                for stat in stat_list:
+                for stat in accuracy_stat_list(stat_list):
                     # Calculate absolute errors
                     for prefix in ['Total', 'Home', 'Away']:
                         abs_err_col = f"{prefix} {stat} Absolute Error"
