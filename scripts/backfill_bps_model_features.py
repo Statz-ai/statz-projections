@@ -60,6 +60,13 @@ UPDATE projection_model_dataset d
  WHERE d.competition_id = %s AND d.team_{col} IS NULL
 """
 
+# The zero rule keys off THIS STAT being present for the fixture, not on
+# team_stats_imported. Big chances were not collected at all in the oldest
+# season and only partially outside the PL in the middle one; those fixtures
+# have every other stat imported, so team_stats_imported=1 would stamp a
+# fabricated 0 on ~2,500 rows that are genuinely unknown. Requiring a sibling
+# row for the same stats_type means "the stat was being recorded for this
+# match, and this team registered none" — which is a true zero.
 ACTUALS_ZERO_SQL = """
 UPDATE projection_model_dataset d
   JOIN fixtures f ON f.id = d.fixture_id
@@ -67,7 +74,8 @@ UPDATE projection_model_dataset d
  WHERE d.competition_id = %s
    AND d.team_{col} IS NULL
    AND f.state_id = 5
-   AND f.team_stats_imported = 1
+   AND EXISTS (SELECT 1 FROM fixture_team_stats s
+                WHERE s.fixture_id = d.fixture_id AND s.stats_type_id = %s)
 """
 
 UPDATE_SQL_TEMPLATE = """
@@ -165,7 +173,7 @@ async def backfill_actuals(comp_id, label, stat_ids, dry_run=False):
             logger.info(f"[{label}] DRY RUN actuals {col}: would copy {int(probe['n'].iloc[0])}")
             continue
         copied = await _execute(ACTUALS_COPY_SQL.format(col=col), (sid, comp_id))
-        zeroed = await _execute(ACTUALS_ZERO_SQL.format(col=col), (comp_id,))
+        zeroed = await _execute(ACTUALS_ZERO_SQL.format(col=col), (comp_id, sid))
         logger.info(f"[{label}] actuals {col}: copied={copied} zeroed={zeroed}")
 
 
