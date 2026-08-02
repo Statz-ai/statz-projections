@@ -1669,7 +1669,8 @@ class ProjectionService:
 
         for fixture_id in team_projections_save['fixture_id'].unique():
             fixture_projections = team_projections_save[team_projections_save['fixture_id'] == fixture_id]
-            for stat in stat_list:
+            # accuracy dataset has no columns for the PL-only stats
+            for stat in accuracy_stat_list(stat_list):
                 projection_accuracy_dataset_league.loc[
                     projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Home Projected ' + stat] = \
                 fixture_projections.loc[fixture_projections['Venue'] == 'H', stat].values[0]
@@ -4394,7 +4395,8 @@ class ProjectionService:
 
         for fixture_id in team_projections_save['fixture_id'].unique():
             fixture_projections = team_projections_save[team_projections_save['fixture_id'] == fixture_id]
-            for stat in stat_list:
+            # accuracy dataset has no columns for the PL-only stats
+            for stat in accuracy_stat_list(stat_list):
                 projection_accuracy_dataset_league.loc[
                     projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Home Projected ' + stat] = \
                 fixture_projections.loc[fixture_projections['Venue'] == 'H', stat].values[0]
@@ -5210,7 +5212,8 @@ class ProjectionService:
 
         for fixture_id in team_projections_save['fixture_id'].unique():
             fixture_projections = team_projections_save[team_projections_save['fixture_id'] == fixture_id]
-            for stat in stat_list:
+            # accuracy dataset has no columns for the PL-only stats
+            for stat in accuracy_stat_list(stat_list):
                 projection_accuracy_dataset_league.loc[
                     projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Home Projected ' + stat] = \
                     fixture_projections.loc[fixture_projections['Venue'] == 'H', stat].values[0]
