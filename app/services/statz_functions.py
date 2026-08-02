@@ -89,9 +89,45 @@ def get_season_id(comp_id, seasons, previous=False):
         return current_season['id'].values[0]
 
 
-def get_stat_list():
-    return ['Goals', 'Shots Total', 'Shots On Target', 'Corners', 'Fouls', 'Yellowcards', 'Tackles', 'Passes',
-            'Successful Passes', 'Total Crosses', 'Interceptions', 'Offsides']
+# Competition id for the Premier League. The two stats below are projected
+# for PL ONLY — they exist purely to feed FPL bonus (BPS), so there is no
+# reason to spend run time on them for the other leagues.
+PL_COMPETITION_ID = 8
+
+# PL-only projected team stats (George, 2026-08-02).
+#   'Key Passes'          — was derived as Shots Total x 0.75 in
+#                           projection_service. Measured across the top 5 the
+#                           real ratio is 0.72-0.74, so the constant was
+#                           consistently over-projecting.
+#   'Big Chances Created' — never projected; BPS proxied it as Key Passes x 0.2.
+# Both are worth 1 and 3 BPS respectively in the published 26/27 table.
+# MODELS ARE TRAINED ON ALL TOP-5 LEAGUES (see get_trainable_stat_list) and
+# only USED for PL — training on PL rows alone would be ~760 rows/season,
+# the small-sample regime that caused the per-league model drift retired in
+# May 2026 (see load_model's docstring).
+PL_ONLY_STATS = ('Key Passes', 'Big Chances Created')
+
+
+def get_stat_list(comp_id=None):
+    """Team stats projected for `comp_id`.
+
+    Returns a fresh list every call — callers mutate it (get_team_round_predictions
+    does stat_list.remove('Goals')).
+    """
+    stats = ['Goals', 'Shots Total', 'Shots On Target', 'Corners', 'Fouls', 'Yellowcards', 'Tackles', 'Passes',
+             'Successful Passes', 'Total Crosses', 'Interceptions', 'Offsides']
+    if comp_id is not None and int(comp_id) == PL_COMPETITION_ID:
+        stats.extend(PL_ONLY_STATS)
+    return stats
+
+
+def get_trainable_stat_list():
+    """Every stat that needs a model file — the union across competitions.
+
+    The retrainer uses this rather than get_stat_list() so the PL-only stats
+    get models built from the full top-5 training set.
+    """
+    return get_stat_list() + list(PL_ONLY_STATS)
 
 
 TEAM_NAME_FIXES = {
@@ -309,8 +345,22 @@ def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None, 
     return fixtures.sort_values(by='kickoff_datetime').reset_index(drop=True)
 
 
+# Point-in-time cutoff for history features (George, 2026-08-02).
+# `as_of=None` means "now", which is correct for the live path: it projects
+# UPCOMING fixtures, so every past match is legitimately available. Backfilling
+# training rows for fixtures ALREADY PLAYED needs the cutoff pinned to that
+# fixture's kickoff instead — otherwise the history feature contains the very
+# result the model is being trained to predict, and the model looks excellent
+# while being worthless. Threading it here (rather than reimplementing the
+# weighted-average maths in a backfill script) keeps training features and
+# serving features computed by exactly the same code.
+def _as_of_cutoff(as_of):
+    import pandas as pd
+    return pd.to_datetime('today') if as_of is None else pd.to_datetime(as_of)
+
+
 def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
-                   games=None, comp_teams=None):
+                   games=None, comp_teams=None, as_of=None):
     team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
     team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
@@ -346,13 +396,20 @@ def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='
         team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value']]
     team_stats.rename(columns={'value': f'Team {stat}'}, inplace=True)
     team_stats = team_stats.sort_values(by='kickoff_datetime').reset_index(drop=True)
+    # Cutoff BEFORE the tail-slice: filtering after would return fewer than
+    # `games` rows for a point-in-time call.
+    if as_of is not None:
+        import pandas as _pd
+        team_stats = team_stats[
+            _pd.to_datetime(team_stats['kickoff_datetime']) < _as_of_cutoff(as_of)
+        ].reset_index(drop=True)
     if games is not None:
         team_stats = team_stats.iloc[-games:]
     return team_stats.reset_index(drop=True)
 
 
 def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
-                  games=None, comp_teams=None):
+                  games=None, comp_teams=None, as_of=None):
     team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
     team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
@@ -388,6 +445,13 @@ def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Y
         team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value']]
     team_stats.rename(columns={'value': f'Team {stat}'}, inplace=True)
     team_stats = team_stats.sort_values(by='kickoff_datetime').reset_index(drop=True)
+    # Cutoff BEFORE the tail-slice: filtering after would return fewer than
+    # `games` rows for a point-in-time call.
+    if as_of is not None:
+        import pandas as _pd
+        team_stats = team_stats[
+            _pd.to_datetime(team_stats['kickoff_datetime']) < _as_of_cutoff(as_of)
+        ].reset_index(drop=True)
     if games is not None:
         team_stats = team_stats.iloc[-games:]
     return team_stats.reset_index(drop=True)
@@ -1027,11 +1091,11 @@ def load_all_models(stat_list, file_path):
     return models
 
 def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
-                            season_id=None, games=None, comp_teams=None):
+                            season_id=None, games=None, comp_teams=None, as_of=None):
     import pandas as pd
-    date_from = pd.to_datetime('today')
+    date_from = _as_of_cutoff(as_of)
     team_stats = get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games,
-                                comp_teams=comp_teams)
+                                comp_teams=comp_teams, as_of=as_of)
     team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
     team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
     team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
@@ -1040,9 +1104,10 @@ def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types
 
 
 def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
-                              comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
+                              comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None,
+                              as_of=None):
     team_stats_df = get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue,
-                                            comp_id, season_id, games, comp_teams=comp_teams)
+                                            comp_id, season_id, games, comp_teams=comp_teams, as_of=as_of)
     stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
     if league_weightings is not None:
         if stat in stat_list:
@@ -1071,11 +1136,11 @@ def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_typ
 
 
 def get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
-                           season_id=None, games=None, comp_teams=None):
+                           season_id=None, games=None, comp_teams=None, as_of=None):
     import pandas as pd
-    date_from = pd.to_datetime('today')
+    date_from = _as_of_cutoff(as_of)
     team_stats = get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games,
-                               comp_teams=comp_teams)
+                               comp_teams=comp_teams, as_of=as_of)
     team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
     team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
     team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
@@ -1084,9 +1149,10 @@ def get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types,
 
 
 def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
-                             comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
+                             comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None,
+                             as_of=None):
     team_stats_df = get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue, comp_id,
-                                           season_id, games, comp_teams=comp_teams)
+                                           season_id, games, comp_teams=comp_teams, as_of=as_of)
     stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
     if league_weightings is not None:
         if stat in stat_list:
@@ -1113,9 +1179,9 @@ def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_type
 
 
 def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None,
-                                games=None, season_id=None, comp_teams=None):
+                                games=None, season_id=None, comp_teams=None, as_of=None):
     team_stats = get_team_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                                games=games, season_id=season_id, comp_teams=comp_teams)
+                                games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
     if len(team_stats) < 5:
         if venue == 'H':
             return 1.1
@@ -1131,9 +1197,9 @@ def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stat
 
 
 def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None, games=None,
-                               season_id=None, comp_teams=None):
+                               season_id=None, comp_teams=None, as_of=None):
     team_stats = get_opp_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                               games=games, season_id=season_id, comp_teams=comp_teams)
+                               games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
     if len(team_stats) < 5:
         if venue == 'H':
             return 0.9
@@ -1149,20 +1215,21 @@ def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats
 
 
 def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types, model, ratings=None,
-                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
+                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None,
+                             comp_teams=None, as_of=None):
     import warnings
     if venue == None:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
-                                                 season_id=season_id, games=games, comp_teams=comp_teams)
+                                                 season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of)
         opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
                                                     ratings=ratings, comp_id=comp_id,
                                                     league_weightings=league_weightings, season_id=season_id,
-                                                    games=games, comp_teams=comp_teams)
+                                                    games=games, comp_teams=comp_teams, as_of=as_of)
     else:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
-                                                 season_id=season_id, games=games, comp_teams=comp_teams) * calculate_team_venue_effect(team,
+                                                 season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of) * calculate_team_venue_effect(team,
                                                                                                                  stat,
                                                                                                                  fixtures,
                                                                                                                  team_stats,
@@ -1172,7 +1239,7 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
                                                                                                                  comp_id=comp_id,
                                                                                                                  games=games * 2,
                                                                                                                  season_id=season_id,
-                                                                                                                 comp_teams=comp_teams)
+                                                                                                                 comp_teams=comp_teams, as_of=as_of)
         if venue == 'H':
             opponent_venue = 'A'
         else:
@@ -1180,14 +1247,14 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
         opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
                                                     ratings=ratings, comp_id=comp_id,
                                                     league_weightings=league_weightings, season_id=season_id,
-                                                    games=games, comp_teams=comp_teams) * calculate_opp_venue_effect(opponent, stat, fixtures,
+                                                    games=games, comp_teams=comp_teams, as_of=as_of) * calculate_opp_venue_effect(opponent, stat, fixtures,
                                                                                               team_stats, teams,
                                                                                               stats_types,
                                                                                               opponent_venue,
                                                                                               comp_id=comp_id,
                                                                                               games=games * 2,
                                                                                               season_id=season_id,
-                                                                                              comp_teams=comp_teams)
+                                                                                              comp_teams=comp_teams, as_of=as_of)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         team_stat = model.predict([[team_history, opponent_history]])

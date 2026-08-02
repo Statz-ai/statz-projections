@@ -225,7 +225,7 @@ class EuroCompProjectionService:
             raise RuntimeError(
                 f"no current season in seasons table for competition_id={comp_id} — skipping"
             )
-        stat_list = get_stat_list()
+        stat_list = get_stat_list(comp_id)
 
         logger.info(f'[{league}] Building cross-league ratings...')
 

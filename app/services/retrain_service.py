@@ -37,7 +37,7 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 
 from app.repository.projection_dataset_repo import load_model_dataset_async
 from app.repository.projection_model_repo import fetch_active_model, insert_projection_model, promote_model
-from app.services.statz_functions import get_stat_list
+from app.services.statz_functions import get_stat_list, get_trainable_stat_list
 
 logger = logging.getLogger("retrain")
 
@@ -314,7 +314,10 @@ async def retrain_all_models(dry_run: bool = False) -> dict:
     all_df = await load_model_dataset_async()
     logger.info(f"[retrain] loaded {len(all_df)} total rows from projection_model_dataset")
 
-    stat_list = [s for s in get_stat_list() if s != "Goals"]
+    # Trainable set, not get_stat_list(): the PL-only stats (Key Passes,
+    # Big Chances Created) need models built from the FULL top-5 training
+    # set even though only the PL run consumes them.
+    stat_list = [s for s in get_trainable_stat_list() if s != "Goals"]
     # `per_league` / `skipped_leagues` kept in the response shape so admin
     # / API consumers don't break, but are always empty now — per-league
     # models were retired 2026-05-21 (every league reads the same global
@@ -411,7 +414,7 @@ async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: b
     scope = "All Leagues"
     logger.info(f"[retrain partial] START scope={scope} stats={stats}")
 
-    valid_stats = [s for s in get_stat_list() if s != "Goals"]
+    valid_stats = [s for s in get_trainable_stat_list() if s != "Goals"]
     unknown = [s for s in stats if s not in valid_stats]
     if unknown:
         logger.warning(f"[retrain partial] unknown stats (skipped): {unknown}")

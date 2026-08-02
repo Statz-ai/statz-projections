@@ -386,7 +386,7 @@ class ProjectionService:
             ctx.previous_season_id_below = get_season_id(ctx.league_below_id, ctx.seasons, True) if ctx.league_below_id else None
         ctx.previous_season_id_above = get_season_id(ctx.league_above_id, ctx.seasons, True) if ctx.league_above_id else None
 
-        ctx.stat_list = get_stat_list()
+        ctx.stat_list = get_stat_list(ctx.league_id)
 
         # Auto-detect xG availability by checking if any player xG stats
         # exist for this league's current-season fixtures. No manual config
@@ -1345,7 +1345,7 @@ class ProjectionService:
 
         # In[20]:
 
-        stat_list = get_stat_list()
+        stat_list = get_stat_list(league_id)
 
         # In[21]:
 
@@ -1559,7 +1559,11 @@ class ProjectionService:
 
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
-        team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
+        # PL projects Key Passes properly (get_stat_list). Everywhere else it
+        # stays derived — measured 0.72-0.74 across the top 5, so 0.75 runs a
+        # little high. George, 2026-08-02.
+        if 'Key Passes' not in team_projections.columns:
+            team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
         _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
@@ -3433,7 +3437,7 @@ class ProjectionService:
         # In[ ]:
 
 
-        stat_list = get_stat_list()
+        stat_list = get_stat_list(league_id)
 
         # In[21]:
 
@@ -3623,7 +3627,11 @@ class ProjectionService:
 
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
-        team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
+        # PL projects Key Passes properly (get_stat_list). Everywhere else it
+        # stays derived — measured 0.72-0.74 across the top 5, so 0.75 runs a
+        # little high. George, 2026-08-02.
+        if 'Key Passes' not in team_projections.columns:
+            team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
         _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
@@ -4072,7 +4080,7 @@ class ProjectionService:
 
         # In[20]:
 
-        stat_list = get_stat_list()
+        stat_list = get_stat_list(league_id)
 
         # In[21]:
 
@@ -4279,7 +4287,11 @@ class ProjectionService:
 
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
-        team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
+        # PL projects Key Passes properly (get_stat_list). Everywhere else it
+        # stays derived — measured 0.72-0.74 across the top 5, so 0.75 runs a
+        # little high. George, 2026-08-02.
+        if 'Key Passes' not in team_projections.columns:
+            team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
         _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
@@ -4884,7 +4896,7 @@ class ProjectionService:
             avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table,
                                                                                               all_tables)
 
-        stat_list = get_stat_list()
+        stat_list = get_stat_list(league_id)
 
         # In[21]:
 
@@ -5091,7 +5103,11 @@ class ProjectionService:
 
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
-        team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
+        # PL projects Key Passes properly (get_stat_list). Everywhere else it
+        # stays derived — measured 0.72-0.74 across the top 5, so 0.75 runs a
+        # little high. George, 2026-08-02.
+        if 'Key Passes' not in team_projections.columns:
+            team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
         _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']

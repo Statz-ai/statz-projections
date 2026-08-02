@@ -60,15 +60,21 @@ TEAM_STAT_NAMES = (
     "Total Crosses",
     "Interceptions",
     "Offsides",
-    # Assists + Key Passes are computed columns added to team_predictions
-    # downstream of get_team_round_predictions (Assists = Goals × 0.82,
-    # Key Passes = Shots Total × 0.75). distribute_team_predictions_to_players
-    # iterates these as part of stat_list, calling get_player_weighted_average
-    # which hits team_stats per row by stat_type_id. Without these in the
-    # loaded set, the merge fillna's to 0 → denominator collapses → NaN-guard
-    # fires for every PL player on these two stats.
+    # Assists is a computed column added to team_predictions downstream of
+    # get_team_round_predictions (Assists = Goals × 0.82).
+    # distribute_team_predictions_to_players iterates it as part of stat_list,
+    # calling get_player_weighted_average which hits team_stats per row by
+    # stat_type_id. Without it in the loaded set, the merge fillna's to 0 →
+    # denominator collapses → NaN-guard fires for every PL player.
     "Assists",
+    # Key Passes + Big Chances Created are PROJECTED team stats for the PL
+    # only (statz_functions.PL_ONLY_STATS) — they feed FPL bonus. Key Passes
+    # was previously derived as Shots Total × 0.75 everywhere; that fallback
+    # is still used for non-PL leagues. Loaded for ALL leagues regardless,
+    # because the models are trained on the full top-5 set. Coverage checked
+    # 2026-08-02 across the top 5: Key Passes 100%, Big Chances 98-99%.
     "Key Passes",
+    "Big Chances Created",
     # Expected Assists (xA) — FPL-only synthetic stat. No Sportmonks rows
     # exist; LeagueDataLoader._overlay_fpl_stats injects per-fixture team
     # totals (sum of FPL player xA) into team_stats in-memory for PL only.

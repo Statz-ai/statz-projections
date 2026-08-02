@@ -362,7 +362,7 @@ class ProjectionAllTeams:
                 else:
                     previous_season_id_below = get_season_id(league_below_id, seasons, True) if league_below_id else None
                 previous_season_id_above = get_season_id(league_above_id, seasons, True) if league_above_id else None
-                stat_list = get_stat_list()
+                stat_list = get_stat_list(league_id)
 
                 # ## **Get Previous Weeks Data**
 
@@ -1076,7 +1076,7 @@ class ProjectionAllTeams:
 
                 # In[20]:
 
-                stat_list = get_stat_list()
+                stat_list = get_stat_list(league_id)
 
                 # In[21]:
 
