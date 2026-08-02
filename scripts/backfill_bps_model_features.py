@@ -122,6 +122,11 @@ async def load_league(comp_id):
                AND fixture_id IN ({','.join(['%s'] * len(fx_ids))})""",
         st_ids + fx_ids,
     )
+    # fixture_team_stats.value is varchar(255). LeagueDataLoader casts it
+    # (data_loader.py:507); without the same cast the weighted average
+    # multiplies STRINGS by the weight and .sum() concatenates them into one
+    # enormous digit soup, which then fails to convert to numeric.
+    team_stats["value"] = pd.to_numeric(team_stats["value"], errors="coerce")
     teams = await _fetch("SELECT id, name FROM teams")
     # competition_season_teams — same table LeagueDataLoader reads into
     # ctx.comp_teams. get_team_id() scopes name lookups through it.
