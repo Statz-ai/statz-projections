@@ -33,6 +33,12 @@ MODEL_DATASET_STATS = [
     "shots_total", "shots_on_target", "corners", "fouls", "yellowcards",
     "tackles", "passes", "successful_passes", "interceptions",
     "total_crosses", "offsides",
+    # FPL bonus (BPS) inputs. PROJECTED for the PL only (get_stat_list(comp_id)),
+    # but the columns are written for every league because the models train on
+    # the full top-5 pool. For non-PL leagues the history features are simply
+    # absent from the df and land as NULL; the actuals are filled by Laravel's
+    # BackfillFixtureAccuracy::MODEL_ONLY_STAT_MAP regardless.
+    "key_passes", "big_chances_created",
 ]
 
 ACCURACY_DATASET_STATS = [
@@ -128,6 +134,10 @@ def _title_parquet_col(stat_snake, history=False, opponent=False):
 #  projection_model_dataset
 # ──────────────────────────────────────────────────────────────────────────
 
+# 9 identity columns + 1 actual + 2 history per stat.
+_MODEL_PLACEHOLDER_COUNT = 9 + 3 * len(MODEL_DATASET_STATS)
+_MODEL_PLACEHOLDERS = ", ".join(["%s"] * _MODEL_PLACEHOLDER_COUNT)
+
 MODEL_DATASET_SQL = """
 INSERT INTO projection_model_dataset (
     fixture_id, competition_id, season_id, team_id, opponent_id,
@@ -135,6 +145,7 @@ INSERT INTO projection_model_dataset (
     team_shots_total, team_shots_on_target, team_corners, team_fouls,
     team_yellowcards, team_tackles, team_passes, team_successful_passes,
     team_interceptions, team_total_crosses, team_offsides,
+    team_key_passes, team_big_chances_created,
     team_shots_total_history, opponent_shots_total_history_against,
     team_shots_on_target_history, opponent_shots_on_target_history_against,
     team_corners_history, opponent_corners_history_against,
@@ -146,13 +157,14 @@ INSERT INTO projection_model_dataset (
     team_interceptions_history, opponent_interceptions_history_against,
     team_total_crosses_history, opponent_total_crosses_history_against,
     team_offsides_history, opponent_offsides_history_against,
+    team_key_passes_history, opponent_key_passes_history_against,
+    team_big_chances_created_history, opponent_big_chances_created_history_against,
     created_at, updated_at
 ) VALUES (
-    %s, %s, %s, %s, %s,
-    %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    -- identity (9), then one actual per stat, then two history columns per
+    -- stat — generated from MODEL_DATASET_STATS so the count cannot drift
+    -- from the column list above when a stat is added.
+    {model_placeholders},
     NOW(), NOW()
 ) ON DUPLICATE KEY UPDATE
     competition_id = VALUES(competition_id),
@@ -188,8 +200,12 @@ INSERT INTO projection_model_dataset (
     opponent_total_crosses_history_against = VALUES(opponent_total_crosses_history_against),
     team_offsides_history = VALUES(team_offsides_history),
     opponent_offsides_history_against = VALUES(opponent_offsides_history_against),
+    team_key_passes_history = VALUES(team_key_passes_history),
+    opponent_key_passes_history_against = VALUES(opponent_key_passes_history_against),
+    team_big_chances_created_history = VALUES(team_big_chances_created_history),
+    opponent_big_chances_created_history_against = VALUES(opponent_big_chances_created_history_against),
     updated_at = NOW()
-"""
+""".replace("{model_placeholders}", _MODEL_PLACEHOLDERS)
 
 
 def _build_model_rows(df, league_id, teams, fixtures, comp_teams):
