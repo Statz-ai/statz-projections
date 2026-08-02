@@ -1214,11 +1214,21 @@ def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats
         return away / avg
 
 
-def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types, model, ratings=None,
-                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None,
-                             comp_teams=None, as_of=None):
-    import warnings
-    if venue == None:
+def get_team_stat_histories(team, opponent, fixtures, stat, team_stats, teams, stats_types, ratings=None,
+                            venue=None, comp_id=None, league_weightings=None, season_id=None, games=None,
+                            comp_teams=None, as_of=None):
+    """The two model features for (team, opponent, stat): team_history and
+    opponent_history_against.
+
+    Split out of get_team_stat_prediction (2026-08-02) with NO behaviour
+    change, so the model-dataset backfill computes training features through
+    exactly the same code that serves them. A separate implementation is the
+    classic way to end up with train/serve skew.
+
+    `as_of` pins the history cutoff — see _as_of_cutoff. Leave it None for the
+    live path.
+    """
+    if venue is None:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
                                                  season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of)
@@ -1227,34 +1237,33 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
                                                     league_weightings=league_weightings, season_id=season_id,
                                                     games=games, comp_teams=comp_teams, as_of=as_of)
     else:
-        team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
-                                                 ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
-                                                 season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of) * calculate_team_venue_effect(team,
-                                                                                                                 stat,
-                                                                                                                 fixtures,
-                                                                                                                 team_stats,
-                                                                                                                 teams,
-                                                                                                                 stats_types,
-                                                                                                                 venue,
-                                                                                                                 comp_id=comp_id,
-                                                                                                                 games=games * 2,
-                                                                                                                 season_id=season_id,
-                                                                                                                 comp_teams=comp_teams, as_of=as_of)
-        if venue == 'H':
-            opponent_venue = 'A'
-        else:
-            opponent_venue = 'H'
-        opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
-                                                    ratings=ratings, comp_id=comp_id,
-                                                    league_weightings=league_weightings, season_id=season_id,
-                                                    games=games, comp_teams=comp_teams, as_of=as_of) * calculate_opp_venue_effect(opponent, stat, fixtures,
-                                                                                              team_stats, teams,
-                                                                                              stats_types,
-                                                                                              opponent_venue,
-                                                                                              comp_id=comp_id,
-                                                                                              games=games * 2,
-                                                                                              season_id=season_id,
-                                                                                              comp_teams=comp_teams, as_of=as_of)
+        team_history = get_team_weighted_average(
+            stat, team, fixtures, team_stats, teams, stats_types, 0.98, ratings=ratings, comp_id=comp_id,
+            league_weightings=league_weightings, season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of
+        ) * calculate_team_venue_effect(
+            team, stat, fixtures, team_stats, teams, stats_types, venue, comp_id=comp_id, games=games * 2,
+            season_id=season_id, comp_teams=comp_teams, as_of=as_of
+        )
+        opponent_venue = 'A' if venue == 'H' else 'H'
+        opponent_history = get_opp_weighted_average(
+            stat, opponent, fixtures, team_stats, teams, stats_types, 0.98, ratings=ratings, comp_id=comp_id,
+            league_weightings=league_weightings, season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of
+        ) * calculate_opp_venue_effect(
+            opponent, stat, fixtures, team_stats, teams, stats_types, opponent_venue, comp_id=comp_id, games=games * 2,
+            season_id=season_id, comp_teams=comp_teams, as_of=as_of
+        )
+    return team_history, opponent_history
+
+
+def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types, model, ratings=None,
+                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None,
+                             comp_teams=None, as_of=None):
+    import warnings
+    team_history, opponent_history = get_team_stat_histories(
+        team, opponent, fixtures, stat, team_stats, teams, stats_types, ratings=ratings, venue=venue,
+        comp_id=comp_id, league_weightings=league_weightings, season_id=season_id, games=games,
+        comp_teams=comp_teams, as_of=as_of,
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         team_stat = model.predict([[team_history, opponent_history]])
@@ -1341,6 +1350,19 @@ def get_simple_team_stat_prediction(team, opponent, fixtures, stat, team_stats, 
     return round(float(team_stat), 2), team_history, opponent_history
 
 
+_MISSING_MODEL_WARNED: set = set()
+
+
+def _warn_missing_model(stat):
+    """Warn once per stat per process — this fires per team per fixture."""
+    if stat in _MISSING_MODEL_WARNED:
+        return
+    _MISSING_MODEL_WARNED.add(stat)
+    _PROJ_LOGGER.warning(
+        f"[get_team_all_stats_prediction] no model for '{stat}' — stat not projected this run"
+    )
+
+
 def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stats, teams, stats_types, models,
                                   ratings=None, venue=None, comp_id=None, league_weightings=None, season_id=None,
                                   games=None, comp_teams=None):
@@ -1350,7 +1372,16 @@ def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stat
     predictions['Venue'] = venue
     original_weightings = league_weightings.copy() if league_weightings is not None else None
     for stat in stat_list:
-        model = models[stat]
+        model = models.get(stat)
+        if model is None:
+            # No trained model file for this stat yet. Skip it rather than
+            # crashing on None.predict — the stat simply isn't projected, which
+            # is exactly the state every league was in before it was added, and
+            # downstream fallbacks (e.g. the derived Key Passes = Shots x 0.75)
+            # key off the column being absent. Lets a new stat be deployed
+            # before its model is trained. George, 2026-08-02.
+            _warn_missing_model(stat)
+            continue
         league_weightings = original_weightings.copy() if original_weightings is not None else None
         # UPDATED - store history in predictions
         predictions[stat], predictions['Team ' + stat + ' History'], predictions[
