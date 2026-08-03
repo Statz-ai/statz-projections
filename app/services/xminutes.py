@@ -401,16 +401,15 @@ def stamp_xmin_columns(frame, profiles, confirmed_xi=None):
     return frame
 
 
-def apply_exposure_scaling(frame):
-    """Scale the count-shaped stat columns by xmin_exposure in place.
-    Call ONLY on an FPL-local copy — never on the frame that feeds
-    player_projections / Opta / FanTeam / Dream11."""
-    if "xmin_exposure" not in frame.columns:
-        return frame
-    for col in XMIN_SCALED_STAT_COLS:
-        if col in frame.columns:
-            frame[col] = frame[col] * frame["xmin_exposure"]
-    return frame
+# apply_exposure_scaling REMOVED 2026-08-03. It was the FPL_PER90_POINTS=0
+# rollback, superseded by apply_per90_scaling on 2026-07-29. It could no longer
+# do its job: the bonus simulator reads the "{stat} per90" columns that only
+# apply_per90_scaling stamps, so falling back would have produced silently
+# meaningless bonus rather than the old behaviour.
+#
+# The xmin_exposure FIELD is kept — projection_all_teams_service still uses it
+# to discount the empirical CBIT hit rate by minutes. That belongs with the
+# parked CBIT work, and arguably wants xmin_bands/90 rather than exposure.
 
 
 def apply_band_dials(profiles, dials_df):

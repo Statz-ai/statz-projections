@@ -1796,12 +1796,15 @@ class ProjectionService:
             )
         finally:
             release_source_connection(_ll_conn)
-        # Per-90 capture (xmins-methodology §11 Task 1): PL full runs only,
-        # behind FPL_PER90_WRITE (default OFF — zero live effect until
-        # deliberately enabled). Purely additive: shares byte-identical.
-        _per90_points_on = os.getenv("FPL_PER90_POINTS", "1") == "1"
+        # Per-90 capture (xmins-methodology §11 Task 1): PL full runs only.
+        # FPL_PER90_WRITE / FPL_PER90_POINTS both removed 2026-08-03.
+        # FPL_PER90_POINTS=0 selected the legacy exposure scaling as a
+        # rollback, but the bonus simulator reads the "{stat} per90" columns
+        # that only apply_per90_scaling stamps — so setting it to 0 would have
+        # produced silently meaningless bonus rather than the old behaviour.
+        # A kill switch that no longer kills cleanly is worse than none.
         _per90_collector = (
-            [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "1") == "1" or _per90_points_on)) else None
+            [] if league_id == 8 else None
         )
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
@@ -2129,7 +2132,7 @@ class ProjectionService:
                     XMIN_ENABLED as _xmin_enabled,
                     eligible_past_fixtures, build_minutes_frame,
                     get_expected_minutes, stamp_xmin_columns,
-                    apply_exposure_scaling, apply_per90_scaling,
+                    apply_per90_scaling,
                     apply_band_dials, apply_share_dials,
                     apply_availability_flags,
                 )
@@ -2246,7 +2249,7 @@ class ProjectionService:
                             # Non-fatal: nothing consumes these columns until the
                             # BPS rebuild lands, and a run must not die for them.
                             logger.warning(f"[{league}] static rates skipped: {_rate_err}")
-                        if _per90_points_on and _per90_collector:
+                        if _per90_collector:
                             # Per-90 path (George, 2026-07-29): λ = column ×
                             # xmin_bands ÷ that stat's own m̄ — i.e. team_proj
                             # × share90 × xMins/90, xMins from the three
@@ -2276,8 +2279,7 @@ class ProjectionService:
                                     _p90_chk = 'OK' if bool((_lhs - _rhs).abs().max() < 1e-6) else 'MISMATCH'
                             logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
                                         f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
-                        else:
-                            _fpl_frame = apply_exposure_scaling(_fpl_frame)
+
                         # Team-down DC hit rate recomputed on the exposure-
                         # scaled inputs so def_con_pct is minutes-aware too.
                         _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
@@ -2304,10 +2306,9 @@ class ProjectionService:
                     if _xmin_enabled and '_model_profiles' in dir():
                         _bundle_frame = _fpl_base.copy()
                         _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
-                        if _per90_points_on and _per90_collector:
+                        if _per90_collector:
                             _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
-                        else:
-                            _bundle_frame = apply_exposure_scaling(_bundle_frame)
+
                         _bundle_frame['CBIT Hit Rate'] = _bundle_frame.apply(_td_cbit_hit_rate, axis=1)
                         _bundle_frame['def_con_pct'] = (_bundle_frame['CBIT Hit Rate'] * 100).round(2)
                         await save_assembly_bundles(_bundle_frame, score_preds, team_projections)
@@ -2360,13 +2361,18 @@ class ProjectionService:
                     .drop_duplicates(['fixture_id', 'player_id'])
                 )
                 fpl_df = fpl_df.merge(_def_con, on=['fixture_id', 'player_id'], how='left')
-                # Expected minutes ride along for persistence (verification +
-                # future planner display). NULL when xMinutes is off.
-                if 'xmin_expected' in _fpl_frame.columns:
+                # Expected minutes = xmin_bands, the PUBLISHED xMins
+                # (90*p90 + 75*(p60-p90) + 30*(p_play-p60), methodology §2) and
+                # the figure that drives scoring. Was xmin_expected — the
+                # legacy exposure field superseded on 2026-07-29 — which left
+                # 1,995 rows across 105 players showing minutes that had
+                # nothing to do with the points beside them: Rodri read 51.3
+                # xMins against 0 points because the flag zeroed his BANDS.
+                if 'xmin_bands' in _fpl_frame.columns:
                     _xm_exp = (
-                        _fpl_frame[['fixture_id', 'player_id', 'xmin_expected']]
+                        _fpl_frame[['fixture_id', 'player_id', 'xmin_bands']]
                         .drop_duplicates(['fixture_id', 'player_id'])
-                        .rename(columns={'xmin_expected': 'expected_minutes'})
+                        .rename(columns={'xmin_bands': 'expected_minutes'})
                     )
                     fpl_df = fpl_df.merge(_xm_exp, on=['fixture_id', 'player_id'], how='left')
                 else:

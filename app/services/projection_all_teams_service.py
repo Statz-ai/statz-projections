@@ -1383,11 +1383,10 @@ class ProjectionAllTeams:
                 finally:
                     release_source_connection(_ll_conn)
                 # Per-90 capture — mirrors the single-league path exactly
-                # (xmins-methodology §11 Task 1): PL only, FPL_PER90_WRITE
+                # (xmins-methodology §11 Task 1): PL only. FPL_PER90_WRITE
                 # gated (default OFF), additive, write failure non-fatal.
                 _per90_collector = (
-                    [] if (league_id == 8 and (os.getenv("FPL_PER90_WRITE", "1") == "1"
-                                               or os.getenv("FPL_PER90_POINTS", "1") == "1")) else None
+                    [] if league_id == 8 else None
                 )
                 pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                         fixtures_df, players, teams, comps, 0.97,
@@ -1608,7 +1607,7 @@ class ProjectionAllTeams:
                             XMIN_ENABLED as _xmin_enabled,
                             eligible_past_fixtures, build_minutes_frame,
                             get_expected_minutes, stamp_xmin_columns,
-                            apply_exposure_scaling, apply_per90_scaling,
+                            apply_per90_scaling,
                             apply_band_dials, apply_share_dials,
                         )
                         _fpl_dials = getattr(ProjectionService._current_source, 'fpl_player_dials', None)
@@ -1650,7 +1649,7 @@ class ProjectionAllTeams:
                                 _fpl_frame = _fpl_base.copy()
                                 _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                                 confirmed_xi=_confirmed_lineups)
-                                if (os.getenv("FPL_PER90_POINTS", "1") == "1") and _per90_collector:
+                                if _per90_collector:
                                     # Per-90 path — mirrors the single-league
                                     # branch exactly (see projection_service).
                                     _P90_ALIASES = {'Yellowcards': 'Yellow Cards'}
@@ -1661,8 +1660,6 @@ class ProjectionAllTeams:
                                     _fpl_frame = apply_per90_scaling(_fpl_frame, _m_bar_lookup)
                                     logger.info(f"[{league}] FPL per-90 points path ON — "
                                                 f"{len(_m_bar_lookup)} (player, stat) m̄ terms")
-                                else:
-                                    _fpl_frame = apply_exposure_scaling(_fpl_frame)
                                 # This path has no team-down CBIT recompute
                                 # (empirical hit rate only) — scale it by
                                 # exposure directly as the minutes discount.
@@ -1687,10 +1684,8 @@ class ProjectionAllTeams:
                             if '_model_profiles' in dir():
                                 _bundle_frame = _fpl_base.copy()
                                 _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
-                                if (os.getenv("FPL_PER90_POINTS", "1") == "1") and _per90_collector:
+                                if _per90_collector:
                                     _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
-                                else:
-                                    _bundle_frame = apply_exposure_scaling(_bundle_frame)
                                 if 'CBIT Hit Rate' in _bundle_frame.columns:
                                     _bundle_frame['CBIT Hit Rate'] = (
                                         _bundle_frame['CBIT Hit Rate'] * _bundle_frame['xmin_exposure']
@@ -1705,11 +1700,11 @@ class ProjectionAllTeams:
 
                         fpl_df = fpl_point_df.merge(bonus, on=['fixture_id', 'player_id'], how='left')
                         fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
-                        if 'xmin_expected' in _fpl_frame.columns:
+                        if 'xmin_bands' in _fpl_frame.columns:
                             _xm_exp = (
-                                _fpl_frame[['fixture_id', 'player_id', 'xmin_expected']]
+                                _fpl_frame[['fixture_id', 'player_id', 'xmin_bands']]
                                 .drop_duplicates(['fixture_id', 'player_id'])
-                                .rename(columns={'xmin_expected': 'expected_minutes'})
+                                .rename(columns={'xmin_bands': 'expected_minutes'})
                             )
                             fpl_df = fpl_df.merge(_xm_exp, on=['fixture_id', 'player_id'], how='left')
                         else:
