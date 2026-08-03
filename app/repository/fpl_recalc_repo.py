@@ -216,3 +216,37 @@ async def load_existing_fpl_pairs(player_ids):
     finally:
         if _db.pool:
             _db.pool.release(conn)
+
+
+async def load_existing_bonus(fixture_ids):
+    """Bonus already stored in fpl_projections for these fixtures.
+
+    The recalc path no longer recomputes bonus (George, 2026-08-04): bonus is a
+    RANK, so changing one player forces re-simulating every fixture he appears
+    in, which took the panel's Update past its 60s timeout. Points update
+    instantly; bonus is carried through unchanged and refreshes on the next run.
+
+    Carrying it is not optional — FPL Points = PTS + Bonus, so returning zero
+    would silently strip bonus from every dialled player.
+
+    Returns a DataFrame [fixture_id, player_id, 'Bonus Points'].
+    """
+    if not fixture_ids:
+        return pd.DataFrame(columns=['fixture_id', 'player_id', 'Bonus Points'])
+    conn = await get_connection()
+    try:
+        async with conn.cursor() as cur:
+            ph = ",".join(["%s"] * len(fixture_ids))
+            await cur.execute(
+                f"SELECT fixture_id, player_id, bonus FROM fpl_projections WHERE fixture_id IN ({ph})",
+                tuple(int(f) for f in fixture_ids),
+            )
+            rows = await cur.fetchall()
+    finally:
+        if _db.pool:
+            _db.pool.release(conn)
+    return pd.DataFrame(
+        [{'fixture_id': int(r[0]), 'player_id': int(r[1]),
+          'Bonus Points': float(r[2]) if r[2] is not None else 0.0} for r in rows],
+        columns=['fixture_id', 'player_id', 'Bonus Points'],
+    )

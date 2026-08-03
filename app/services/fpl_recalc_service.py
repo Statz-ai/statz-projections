@@ -21,7 +21,6 @@ the admin panel displays the real number.
 """
 
 import logging
-import os
 import time
 
 import pandas as pd
@@ -35,7 +34,7 @@ from app.services.fpl_scoring_constants import (
     FPL_BONUS_GK, FPL_BONUS_DEF, FPL_BONUS_MID, FPL_BONUS_FWD,
 )
 from app.services.statz_functions import (
-    get_fpl_points, bonus_points_score,
+    get_fpl_points,
 )
 from app.services.xminutes import bands_to_xmins, XMIN_SCALED_STAT_COLS
 
@@ -124,26 +123,23 @@ async def recalc_fpl_players(player_ids) -> dict:
 
     frame = frame.reset_index(drop=True)
     pts = get_fpl_points(frame, score_preds, FPL_POINTS_GK, FPL_POINTS_DEF, FPL_POINTS_MID, FPL_POINTS_FWD)
-    # Bonus MUST use the same allocator as the run. The post-run dial true-up
-    # calls this path for every player in any fixture containing a dialled
-    # player — 14,260 rows on the last run — so while this used the softmax it
-    # silently overwrote the simulator's bonus 14 seconds after the run wrote
-    # it, leaving fpl_projections byte-identical to the previous run.
-    _sim_on = os.getenv('FPL_BONUS_SIM', '1') != '0'
-    bonus = None
-    if _sim_on:
-        try:
-            from app.services.fpl_bonus_sim import simulate_bonus_for_frame
-            bonus = simulate_bonus_for_frame(frame, score_preds)
-            if bonus is None or bonus.empty:
-                raise RuntimeError("simulator returned no rows")
-        except Exception as _sim_err:
-            logger.warning(f"[fpl_recalc] bonus simulator failed, softmax fallback: {_sim_err}")
-            bonus = None
-    if bonus is None:
-        bps = bonus_points_score(frame, score_preds, FPL_BONUS_GK, FPL_BONUS_DEF, FPL_BONUS_MID, FPL_BONUS_FWD)
-        from app.services.statz_functions import get_bonus_points_by_fixture
-        bonus = get_bonus_points_by_fixture(bps, score_preds, expo_factor=0.1)
+    # Bonus is NOT recomputed here (George, 2026-08-04). It is a RANK, so
+    # changing one player forces re-simulating every fixture he appears in —
+    # ~1.7s per fixture at 5,000 samples, which took the panel's Update button
+    # past its 60s timeout (24.3s for just 20 fixtures).
+    #
+    # Instead the stored bonus is carried through unchanged: points update
+    # instantly and bonus refreshes on the next full run. The cost is a window
+    # of up to one run where a dialled player's bonus — and his team-mates',
+    # since it is competitive — reflect the pre-dial minutes.
+    #
+    # Carrying it is not optional: FPL Points = PTS + Bonus, so computing zero
+    # would silently strip bonus from every dialled player.
+    from app.repository.fpl_recalc_repo import load_existing_bonus
+    _fix_ids = sorted({int(f) for f in pts['fixture_id'].dropna().unique()})
+    bonus = await load_existing_bonus(_fix_ids)
+    logger.info(f"[fpl_recalc] bonus carried through unchanged for {len(bonus)} rows "
+                f"across {len(_fix_ids)} fixtures (not recomputed)")
 
     fpl_df = pts.merge(bonus, on=['fixture_id', 'player_id'], how='left')
     fpl_df['Bonus Points'] = fpl_df['Bonus Points'].fillna(0)
