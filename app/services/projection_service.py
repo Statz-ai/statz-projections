@@ -2115,6 +2115,7 @@ class ProjectionService:
                     get_expected_minutes, stamp_xmin_columns,
                     apply_exposure_scaling, apply_per90_scaling,
                     apply_band_dials, apply_share_dials,
+                    apply_availability_flags,
                 )
                 # Admin dials (§12 Phase 5) — standing per-player overrides,
                 # loaded via the same DB-source pattern as promoted ratings.
@@ -2139,6 +2140,30 @@ class ProjectionService:
                                 int(_xm_pid), _xm_team_ids.get(_xm_tname),
                                 _xm_minutes, _xm_past_fx, position=_xm_pos,
                             )
+                        # FPL availability flags shape the bands (George,
+                        # 2026-08-03: "keep them in but give them xMins
+                        # relating to their flag"). BEFORE the bands persist,
+                        # so the panel shows an honest model value, and BEFORE
+                        # dials, so a manual override still wins.
+                        try:
+                            _flag_conn = await get_source_connection()
+                            try:
+                                async with _flag_conn.cursor() as _fc:
+                                    await _fc.execute("""
+                                        SELECT m.player_id, s.status, s.chance_of_playing_next_round
+                                        FROM fpl_player_mappings m
+                                        JOIN fpl_player_snapshots s ON s.fpl_id = m.fpl_id
+                                         AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM fpl_player_snapshots)
+                                        WHERE m.player_id IS NOT NULL AND m.fpl_id IS NOT NULL
+                                    """)
+                                    _flags = {int(r[0]): (r[1], r[2]) for r in await _fc.fetchall()}
+                            finally:
+                                release_source_connection(_flag_conn)
+                            _fz, _fs = apply_availability_flags(_xm_profiles, _flags)
+                            logger.info(f"[{league}] FPL availability flags: {_fz} zeroed, {_fs} scaled "
+                                        f"(from {len(_flags)} flagged records)")
+                        except Exception as _flag_err:
+                            logger.warning(f"[{league}] availability flags skipped: {_flag_err}")
                         # §12 Phase 0: persist standing bands (PRE confirmed-XI —
                         # _xm_profiles is built before any starter_override).
                         # Panel reads fpl_player_bands, never recomputes in PHP.
@@ -2367,9 +2392,17 @@ class ProjectionService:
                                 JOIN fpl_player_snapshots s ON s.fpl_id = m.fpl_id
                                  AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM fpl_player_snapshots)
                                 WHERE m.player_id IS NOT NULL AND m.fpl_id IS NOT NULL
-                                  AND s.status NOT IN ('i','s','u','n')
-                                  AND NOT (s.status = 'd' AND s.chance_of_playing_next_round IS NOT NULL
-                                           AND s.chance_of_playing_next_round <= 25)
+                                  -- Status is NO LONGER a filter (George,
+                                  -- 2026-08-03). A flagged player is a real
+                                  -- FPL asset people own; dropping his rows
+                                  -- meant he vanished from the dials panel and
+                                  -- could not be adjusted. Rodri was flagged
+                                  -- 'i' while playing 99 minutes for Spain
+                                  -- three weeks earlier. The flag now shapes
+                                  -- his BANDS (apply_availability_flags), so
+                                  -- he projects at ~0 xMins and stays visible
+                                  -- and dialable. Membership in the current
+                                  -- bootstrap is handled by the loader gate.
                             """)
                             _allowed = {int(r[0]) for r in await _cur.fetchall()}
                     finally:

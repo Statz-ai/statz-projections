@@ -535,3 +535,55 @@ def apply_per90_scaling(frame, m_bar_by_player_stat):
         frame[col + PER90_SUFFIX] = per90
         frame[col] = per90 * frame["xmin_bands"] / 90.0
     return frame
+
+
+# ── FPL availability flags ───────────────────────────────────────────────
+# The methodology doc calls official FPL flags "club-set appearance
+# probabilities — an input, not a competitor" (§5). We stored them and ignored
+# them: a flagged player was instead DELETED from fpl_projections by a status
+# filter at insert time, so he vanished from the dials panel entirely and
+# George could not adjust him. Rodri is the case that surfaced it — flagged
+# 'i' by FPL while playing 99 minutes for Spain three weeks earlier.
+#
+# Now the flag shapes the bands instead of removing the player.
+FLAG_OUT_STATUSES = ('i', 's', 'u', 'n')   # injured / suspended / unavailable / ineligible
+
+
+def apply_availability_flags(profiles, flags_by_player):
+    """Scale bands by FPL's stated availability, in place.
+
+    flags_by_player: {player_id: (status, chance_of_playing_next_round)}
+
+    Applied BEFORE fpl_player_bands is persisted, so the panel shows an honest
+    model value ("0% — injured") rather than a number that ignores a known
+    injury, and BEFORE dials, so a manual override still wins.
+
+      i/s/u/n, or chance == 0  ->  bands zeroed
+      d with a chance          ->  bands scaled by chance/100
+      anything else            ->  untouched
+
+    Returns (zeroed, scaled).
+    """
+    if not flags_by_player:
+        return 0, 0
+    zeroed = scaled = 0
+    for pid, prof in profiles.items():
+        flag = flags_by_player.get(int(pid))
+        if not flag:
+            continue
+        status, chance = flag
+        chance = None if chance is None else float(chance)
+        if status in FLAG_OUT_STATUSES or chance == 0:
+            prof.update({"p_play": 0.0, "p60": 0.0, "p90": 0.0, "xmin_bands": 0.0})
+            zeroed += 1
+        elif status == 'd' and chance is not None and 0 < chance < 100:
+            f = chance / 100.0
+            p_play = prof.get("p_play", 0.0) * f
+            p60 = min(prof.get("p60", 0.0) * f, p_play)
+            p90 = min(prof.get("p90", 0.0) * f, p60)
+            prof.update({
+                "p_play": round(p_play, 4), "p60": round(p60, 4), "p90": round(p90, 4),
+                "xmin_bands": round(bands_to_xmins(p_play, p60, p90), 1),
+            })
+            scaled += 1
+    return zeroed, scaled
