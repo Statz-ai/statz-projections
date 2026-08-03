@@ -77,6 +77,12 @@ _FIXTURE_LOOKBACK_YEARS = 2
 _PLAYER_CHUNK_SIZE = 500
 
 
+# Minimum distinct players for a fpl_player_snapshots date to be treated as a
+# complete bootstrap. FPL carries ~560 players across 20 clubs; 400 is well
+# below any real day and well above a partial write.
+FPL_SNAPSHOT_MIN_PLAYERS = 400
+
+
 class LeagueDataLoader:
     """Loads scoped data for projecting ONE competition.
 
@@ -979,6 +985,24 @@ class LeagueDataLoader:
         # projection_service.py / projection_all_teams_service.py.
         # Replaces the legacy `PL Fantasy Players.xlsx` lookup which
         # joined by Player NAME (fragile) — this joins by player_id.
+        # GATED ON CURRENT FPL MEMBERSHIP (George, 2026-08-03: "for FPL we
+        # should only be projecting players in FPL").
+        #
+        # fpl_player_mappings accumulates: a player who left keeps his old
+        # fpl_team_id forever, so the raw table had 68 players at Bournemouth
+        # against FPL's actual 25. That fed the FPL frame 59 players a side,
+        # putting a club's projected minutes at 2,709 in a 90-minute match
+        # (the 990 rule, methodology §10 step 6) and letting ~34 players per
+        # club who are not in the game compete for bonus.
+        #
+        # last_verified_at is NOT a usable filter — the importer stamps all
+        # 951 rows every run, so everything looks current. The latest
+        # fpl_player_snapshots date IS the current bootstrap: 555 players,
+        # Bournemouth exactly 25, matching FPL.
+        #
+        # The date is resolved to the most recent snapshot with a plausible
+        # row count rather than MAX() outright, so a half-written or missed
+        # snapshot day cannot silently gate every player out of FPL.
         self.fpl_player_mappings = await self._sql_to_df(
             conn,
             """
@@ -987,7 +1011,22 @@ class LeagueDataLoader:
                    ftm.team_id AS fpl_club_team_id
             FROM fpl_player_mappings m
             LEFT JOIN fpl_team_mappings ftm ON ftm.fpl_id = m.fpl_team_id
+            WHERE m.player_id IN (
+                SELECT s.player_id FROM fpl_player_snapshots s
+                WHERE s.snapshot_date = (
+                    SELECT snapshot_date FROM fpl_player_snapshots
+                    GROUP BY snapshot_date
+                    HAVING COUNT(DISTINCT player_id) >= %s
+                    ORDER BY snapshot_date DESC
+                    LIMIT 1
+                )
+            )
             """,
+            (FPL_SNAPSHOT_MIN_PLAYERS,),
+        )
+        logger.info(
+            "[loader] fpl_player_mappings gated to current FPL squad: %d players",
+            len(self.fpl_player_mappings),
         )
 
     def _load_local_files(self) -> None:
