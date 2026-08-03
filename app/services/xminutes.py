@@ -86,6 +86,14 @@ def bands_to_xmins(p_play, p60, p90):
 
 MINUTES_STAT_ID = 119  # stats_types 'Minutes Played'
 
+# Per-90 companion columns written by apply_per90_scaling. The bonus simulator
+# samples a MINUTES BAND per player per match, so it needs the rate before the
+# minutes term — not the frame's stat column, which is already at expected
+# minutes. Recovering it by dividing back out is not an option: xmin_bands is
+# 0 for dialled-out players, so that is a division by zero on exactly the
+# players someone has deliberately zeroed. George, 2026-08-03.
+PER90_SUFFIX = " per90"
+
 # Competition scope matching get_player_stats' international filter — the
 # minutes window must cover the same population of games as the rate sample.
 _ALLOWED_SUB_TYPES = ("domestic", "domestic_cup", "cup_international")
@@ -468,10 +476,12 @@ def apply_share_dials(frame, dials_df, team_predictions):
         mask = frame["player_id"].map(lambda p: pd.notna(p) and int(p) in dial_map)
         if mask.any():
             dial_vals = frame.loc[mask, "player_id"].map(lambda p: dial_map[int(p)])
-            frame.loc[mask, stat_col] = (
-                frame.loc[mask, f"_team_{stat_col}"].fillna(0)
-                * dial_vals * frame.loc[mask, "xmin_bands"] / 90.0
-            )
+            _dialled_per90 = frame.loc[mask, f"_team_{stat_col}"].fillna(0) * dial_vals
+            frame.loc[mask, stat_col] = _dialled_per90 * frame.loc[mask, "xmin_bands"] / 90.0
+            # Keep the per-90 companion in step, or a dialled player would be
+            # SIMULATED off his pre-dial rate while his points used the dial.
+            if stat_col + PER90_SUFFIX in frame.columns:
+                frame.loc[mask, stat_col + PER90_SUFFIX] = _dialled_per90
             logger.info("xMinutes dials: %s replaced for %d players", dial_col, len(dial_map))
 
     dc_map = {
@@ -518,5 +528,10 @@ def apply_per90_scaling(frame, m_bar_by_player_stat):
             lambda p, _c=col: m_bar_by_player_stat.get((int(p), _c)) if pd.notna(p) else None
         )
         m_bar = pd.to_numeric(m_bar, errors="coerce").fillna(fallback).replace(0, XMIN_DEFAULT_START_MINUTES)
-        frame[col] = frame[col] * frame["xmin_bands"] / m_bar
+        # Stamp the per-90 rate BEFORE applying the minutes term. Algebraically
+        # identical to the old single expression:
+        #   col x 90/m_bar x xmin_bands/90  ==  col x xmin_bands/m_bar
+        per90 = frame[col] * 90.0 / m_bar
+        frame[col + PER90_SUFFIX] = per90
+        frame[col] = per90 * frame["xmin_bands"] / 90.0
     return frame

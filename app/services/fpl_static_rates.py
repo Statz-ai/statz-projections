@@ -110,6 +110,12 @@ def stamp_rate_columns(frame, rates_by_column):
         logger.warning("[static-rates] no xmin_bands column — skipping")
         return frame
     for col, rates in rates_by_column.items():
-        per90 = frame["player_id"].map(lambda p: rates.get(p, FALLBACK_RATE))
-        frame[col] = pd.to_numeric(per90, errors="coerce").fillna(FALLBACK_RATE) * frame["xmin_bands"] / 90.0
+        per90 = pd.to_numeric(
+            frame["player_id"].map(lambda p: rates.get(p, FALLBACK_RATE)),
+            errors="coerce",
+        ).fillna(FALLBACK_RATE)
+        # Same per-90 companion convention as apply_per90_scaling, so the bonus
+        # simulator reads every stat's rate the same way.
+        frame[col + " per90"] = per90
+        frame[col] = per90 * frame["xmin_bands"] / 90.0
     return frame

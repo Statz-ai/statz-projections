@@ -147,6 +147,11 @@ PLAYER_STAT_NAMES = (
     # rows for PL fixtures. Required so the team-down CBIT projection
     # can compute the player's CBI share of the team CBI total.
     "Clearances Blocks Interceptions (FPL)",
+    # BPS static-rate stats (fpl_static_rates.py). Player traits rated per-90
+    # from history rather than projected team-down, so they need PLAYER rows
+    # only — deliberately absent from TEAM_STAT_NAMES.
+    "Successful Dribbles",
+    "Big Chances Missed",
 )
 
 
