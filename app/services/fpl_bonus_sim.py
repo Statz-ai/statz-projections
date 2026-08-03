@@ -186,3 +186,146 @@ def simulate_fixture(players, team_goals_against, n_samples=DEFAULT_SAMPLES, see
         p["player_id"]: float(bonus[:, i].mean())
         for i, p in enumerate(players)
     }
+
+
+# ---------------------------------------------------------------------------
+#  Adapter: FPL scoring frame -> simulator inputs
+# ---------------------------------------------------------------------------
+
+# frame column -> simulator stat key. Values are read from the "{col} per90"
+# companion (xminutes.PER90_SUFFIX), NOT the column itself: the frame column is
+# already at expected minutes, and the simulator needs the rate BEFORE the
+# minutes term so it can scale by each drawn band.
+FRAME_TO_SIM = {
+    "Goals": "goals",
+    "Assists": "assists",
+    "Key Passes": "key_passes",
+    "Big Chances Created": "big_chances_created",
+    "Big Chances Missed": "big_chances_missed",
+    "Shots Total": "shots",
+    "Shots On Target": "shots_on_target",
+    "Ball Recovery Average": "recoveries",
+    "Tackles Won Average": "tackles_won",
+    "Successful Dribbles": "dribbles",
+    "Fouls": "fouls",
+    "Fouls Drawn": "fouls_drawn",
+    "Offsides": "offsides",
+    "Yellow Cards": "yellow_cards",
+    "Saves": "saves",
+    "Passes": "passes",
+}
+
+# CBI has no single frame column — Sportmonks tracks the three components
+# separately, and bonus_points_score sums them the same way.
+CBI_PARTS = ("Clearances Average", "Blocked Shots Average", "Interceptions")
+
+POSITION_CODES = {"GK": fpl_bps.GK, "DEF": fpl_bps.DEF, "MID": fpl_bps.MID, "FWD": fpl_bps.FWD}
+
+PER90 = " per90"
+
+
+_MISSING_PER90_WARNED = set()
+
+
+def _rate(row, col):
+    """Per-90 rate for a frame column.
+
+    Reads the "{col} per90" companion. There is deliberately NO fallback to the
+    un-suffixed column: that value is lambda at EXPECTED minutes, so using it as
+    a per-90 rate understates every player — badly for subs — and does so
+    silently, which is worse than returning nothing. Missing -> 0.0 plus a
+    one-off warning naming the column.
+    """
+    key = col + PER90
+    if key in row and row[key] is not None:
+        try:
+            v = float(row[key])
+            if v == v:  # not NaN
+                return max(v, 0.0)
+        except (TypeError, ValueError):
+            pass
+    elif col not in _MISSING_PER90_WARNED:
+        _MISSING_PER90_WARNED.add(col)
+        logger.warning(
+            "[bonus-sim] no '%s' column — that stat contributes 0 to BPS. "
+            "Check it is stamped by apply_per90_scaling and present in BUNDLE_COLS.",
+            key,
+        )
+    return 0.0
+
+
+def _goals_against(score_preds):
+    """{fixture_id: {team: expected goals conceded}} — a team concedes what the
+    OTHER side is projected to score."""
+    out = {}
+    for r in score_preds.to_dict("records"):
+        fid = r.get("id")
+        if fid is None:
+            continue
+        home, away = r.get("Home Team"), r.get("Away Team")
+        try:
+            hg, ag = float(r.get("Home Goals") or 0), float(r.get("Away Goals") or 0)
+        except (TypeError, ValueError):
+            continue
+        out[int(fid)] = {home: ag, away: hg}
+    return out
+
+
+def simulate_bonus_for_frame(frame, score_preds, n_samples=DEFAULT_SAMPLES):
+    """Expected bonus per (fixture_id, player_id) for a whole FPL frame.
+
+    Drop-in for bonus_points_score + get_bonus_points_by_fixture. Returns a
+    DataFrame [fixture_id, player_id, 'Bonus Points'].
+
+    Seeded per fixture_id, so the same inputs always give the same bonus —
+    an unseeded simulator would jitter every player's number on every run.
+    """
+    import pandas as pd
+
+    if frame is None or len(frame) == 0:
+        return pd.DataFrame(columns=["fixture_id", "player_id", "Bonus Points"])
+
+    ga_by_fix = _goals_against(score_preds)
+    rows = []
+    for fid, grp in frame.groupby("fixture_id"):
+        try:
+            fid_int = int(fid)
+        except (TypeError, ValueError):
+            continue
+        players = []
+        for row in grp.to_dict("records"):
+            pos = POSITION_CODES.get(row.get("FPL Position"))
+            if pos is None:
+                continue  # unmapped position can't be scored
+            p = {
+                "player_id": row.get("player_id"),
+                "position": pos,
+                "team": row.get("Team"),
+                "p_play": float(row.get("xmin_p_play") or 0.0),
+                "p60": float(row.get("xmin_p60") or 0.0),
+                "p90": float(row.get("xmin_p90") or 0.0),
+            }
+            for col, key in FRAME_TO_SIM.items():
+                p[key] = _rate(row, col)
+            p["cbi"] = sum(_rate(row, c) for c in CBI_PARTS)
+            passes = p.get("passes", 0.0)
+            acc = _rate(row, "Accurate Passes")
+            p["pass_completion"] = min(acc / passes, 1.0) if passes > 0 else 0.8
+            players.append(p)
+
+        if not players:
+            continue
+        bonus = simulate_fixture(
+            players, ga_by_fix.get(fid_int, {}), n_samples=n_samples, seed=fid_int,
+        )
+        for pid, val in bonus.items():
+            rows.append({"fixture_id": fid_int, "player_id": pid, "Bonus Points": val})
+
+    df = pd.DataFrame(rows, columns=["fixture_id", "player_id", "Bonus Points"])
+    if len(df):
+        logger.info(
+            "[bonus-sim] %d fixtures, %d player rows, mean pool %.2f/fixture",
+            df["fixture_id"].nunique(), len(df),
+            df.groupby("fixture_id")["Bonus Points"].sum().mean(),
+        )
+    return df

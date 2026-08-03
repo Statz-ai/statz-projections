@@ -31,6 +31,19 @@ BUNDLE_COLS = [
     'Tackles Won Average', 'CBIT Average', 'CBIT Hit Rate',
     'Full Match Hit Rate', 'def_con_pct',
     'xmin_p_play', 'xmin_p60', 'xmin_p90', 'xmin_bands', 'xmin_start_len',
+] + [
+    # Per-90 companions (xminutes.PER90_SUFFIX). The bonus simulator samples a
+    # minutes band per player, so it needs the rate BEFORE the minutes term.
+    # Without these the recalc path would silently simulate off lambda-at-
+    # expected-minutes and understate everyone, worst for subs.
+    c + ' per90' for c in (
+        'Goals', 'Assists', 'Key Passes', 'Big Chances Created',
+        'Big Chances Missed', 'Shots Total', 'Shots On Target', 'Passes',
+        'Accurate Passes', 'Fouls', 'Fouls Drawn', 'Offsides', 'Yellow Cards',
+        'Saves', 'Interceptions', 'Total Crosses', 'Successful Dribbles',
+        'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average',
+        'Tackles Won Average',
+    )
 ]
 
 SCORE_PRED_COLS = ['id', 'Home Team', 'Away Team', 'Home Goals', 'Away Goals',
