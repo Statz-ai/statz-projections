@@ -2216,6 +2216,22 @@ class ProjectionService:
                             _fpl_frame = apply_per90_scaling(_fpl_frame, _m_bar_lookup)
                             logger.info(f"[{league}] FPL per-90 points path ON — "
                                         f"{len(_m_bar_lookup)} (player, stat) m̄ terms")
+                            # Prove the per-90 companions are on the LIVE frame
+                            # rather than inferring it from a unit test. The
+                            # bonus simulator reads these; a stat missing one
+                            # contributes 0 to BPS. Identity checked on a real
+                            # row: col == per90 x xmin_bands / 90.
+                            _p90_cols = [c for c in _fpl_frame.columns if c.endswith(' per90')]
+                            _p90_chk = 'n/a'
+                            if _p90_cols and 'xmin_bands' in _fpl_frame.columns:
+                                _c0 = _p90_cols[0][:-len(' per90')]
+                                if _c0 in _fpl_frame.columns:
+                                    _lhs = pd.to_numeric(_fpl_frame[_c0], errors='coerce')
+                                    _rhs = (pd.to_numeric(_fpl_frame[_p90_cols[0]], errors='coerce')
+                                            * pd.to_numeric(_fpl_frame['xmin_bands'], errors='coerce') / 90.0)
+                                    _p90_chk = 'OK' if bool((_lhs - _rhs).abs().max() < 1e-6) else 'MISMATCH'
+                            logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
+                                        f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
                         else:
                             _fpl_frame = apply_exposure_scaling(_fpl_frame)
                         # Team-down DC hit rate recomputed on the exposure-
