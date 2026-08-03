@@ -2120,6 +2120,48 @@ class ProjectionService:
                         _fpl_frame = _fpl_base.copy()
                         _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
                                                         confirmed_xi=_confirmed_lineups)
+
+                        # BPS static rates (George, 2026-08-03): successful
+                        # dribbles + big chances missed are player traits, not
+                        # a share of a team total, so they are rated per-90
+                        # from the last two seasons rather than projected.
+                        # Stamped AFTER stamp_xmin_columns because lambda =
+                        # per90 x xmin_bands / 90 — which is also why these two
+                        # must NOT be added to XMIN_SCALED_STAT_COLS, or the
+                        # minutes term would be applied twice.
+                        try:
+                            from app.services.fpl_static_rates import (
+                                compute_per90_rates, stamp_rate_columns,
+                            )
+                            _rate_seasons = [s for s in (current_season_id, previous_season_id) if s]
+                            _rate_fx = set(
+                                fixtures_df.loc[
+                                    fixtures_df['season_id'].isin(_rate_seasons), 'id'
+                                ].astype(int).tolist()
+                            ) if _rate_seasons else None
+                            _rate_specs = {
+                                'Successful Dribbles': 'Successful Dribbles',
+                                'Big Chances Missed': 'Big Chances Missed',
+                            }
+                            _rates = {}
+                            for _col, _sname in _rate_specs.items():
+                                # get_stat_id raises on an unknown name rather
+                                # than returning None, so guard per-stat: one
+                                # missing stat must not take the other with it.
+                                try:
+                                    _sid = get_stat_id(_sname, stats_types)
+                                except Exception:
+                                    logger.warning(f"[{league}] no stats_type for '{_sname}' — rate skipped")
+                                    continue
+                                _rates[_col] = compute_per90_rates(
+                                    player_stats, _sid, _pos_by_pid, fixture_ids=_rate_fx,
+                                )
+                            if _rates:
+                                _fpl_frame = stamp_rate_columns(_fpl_frame, _rates)
+                        except Exception as _rate_err:
+                            # Non-fatal: nothing consumes these columns until the
+                            # BPS rebuild lands, and a run must not die for them.
+                            logger.warning(f"[{league}] static rates skipped: {_rate_err}")
                         if _per90_points_on and _per90_collector:
                             # Per-90 path (George, 2026-07-29): λ = column ×
                             # xmin_bands ÷ that stat's own m̄ — i.e. team_proj

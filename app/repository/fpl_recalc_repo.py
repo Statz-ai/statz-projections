@@ -24,7 +24,7 @@ BUNDLE_COLS = [
     'fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'FPL Position',
     'Team', 'Opponent', 'Venue', 'Gameweek',
     'Goals', 'Assists', 'Yellow Cards', 'Saves', 'Key Passes',
-    'Big Chances Created',
+    'Big Chances Created', 'Successful Dribbles', 'Big Chances Missed',
     'Interceptions', 'Shots Total', 'Shots On Target', 'Passes',
     'Accurate Passes', 'Fouls', 'Fouls Drawn', 'Offsides', 'Total Crosses',
     'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average',
