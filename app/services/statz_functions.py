@@ -2184,6 +2184,16 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     # league level — no league has 0 Yellowcards, 0 Goals, etc. across
     # every projected player.
     if len(df) > 0:
+        # Duplicate column names make df[s] a DataFrame, and .sum() == 0 then
+        # raises 'truth value of a Series is ambiguous' — which reads as a
+        # pandas mystery rather than what it is. Say so plainly instead.
+        _dupes = [c for c in df.columns[df.columns.duplicated()].unique()]
+        if _dupes:
+            raise ValueError(
+                f"distribute_team_predictions_to_players produced duplicate columns: {_dupes}. "
+                f"A stat is being appended twice — check the column selections in "
+                f"projection_service (stat_list already carries the PL-only stats)."
+            )
         zero_cols = [s for s in existing_stats if df[s].sum() == 0]
         if zero_cols:
             import logging as _logging
