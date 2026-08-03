@@ -2434,6 +2434,11 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
     # goals conceded is per-event-while-on-pitch (exposure = xMins/90).
     _has_xmin = 'xmin_p60' in projections.columns
     _has_bands = 'xmin_bands' in projections.columns
+    # Big Chances Created is projected for the PL only. When the column is
+    # absent (every other league, or a frame built before it was carried
+    # through the column selections) fall back to the old proxy rather than
+    # raising — a KeyError here kills the whole run.
+    _has_bcc = 'Big Chances Created' in projections.columns
     for i in range(len(projections)):
         fixture_id = projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
@@ -2456,7 +2461,14 @@ def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_di
         team = projections['Team'][i]
         save_bonus = projections['Saves'][i] * fpl_bonus_dict['Saves'] if position == 'GK' else 0
         key_passes = projections['Key Passes'][i] * fpl_bonus_dict['Key Passes']
-        big_chances_created = projections['Key Passes'][i] * fpl_bonus_dict['Big Chances Created'] * 0.2
+        # Real projection when we have it; the legacy 'a fifth of key passes are
+        # big chances' proxy otherwise. Measured league-wide the ratio is 0.190
+        # (docs/fpl-bps-rebuild-spec.md), so 0.2 was a fair average — what it
+        # could never do is separate Haaland (0.40) from Watkins (0.174).
+        if _has_bcc:
+            big_chances_created = projections['Big Chances Created'][i] * fpl_bonus_dict['Big Chances Created']
+        else:
+            big_chances_created = projections['Key Passes'][i] * fpl_bonus_dict['Big Chances Created'] * 0.2
         chances_created_bonus = key_passes + big_chances_created
         cbi = projections['Clearances Average'][i] + projections['Blocked Shots Average'][i] + \
               projections['Interceptions'][i]

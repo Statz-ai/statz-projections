@@ -96,7 +96,7 @@ _ALLOWED_SUB_TYPES = ("domestic", "domestic_cup", "cup_international")
 # scaled inputs by the caller, never scaled directly.
 XMIN_SCALED_STAT_COLS = [
     "Goals", "Assists", "Yellow Cards", "Saves",
-    "Key Passes", "Accurate Passes", "Passes",
+    "Key Passes", "Big Chances Created", "Accurate Passes", "Passes",
     "Shots Total", "Shots On Target", "Total Crosses",
     "Interceptions", "Tackles", "Offsides", "Fouls", "Fouls Drawn",
     "Ball Recovery", "Clearances Blocks Interceptions (FPL)",

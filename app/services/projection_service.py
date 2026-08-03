@@ -1572,7 +1572,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -1812,7 +1812,7 @@ class ProjectionService:
         # them from team_projections via pivot; without this they'd be
         # dropped here and the post-pass would compute hit rate on Tackles
         # alone (giving ~0% for everyone).
-        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                       if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
@@ -1831,7 +1831,7 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
-        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                        if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
@@ -3641,7 +3641,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4301,7 +4301,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4506,7 +4506,7 @@ class ProjectionService:
         # them from team_projections via pivot; without this they'd be
         # dropped here and the post-pass would compute hit rate on Tackles
         # alone (giving ~0% for everyone).
-        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                       if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
@@ -4525,7 +4525,7 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
-        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                        if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
@@ -5118,7 +5118,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
