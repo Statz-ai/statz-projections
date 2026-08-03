@@ -995,6 +995,22 @@ class ProjectionService:
         league = league_request.league or 'Championship'
         _start_time = time.time()
         logger.info(f'[{league}] START projections')
+        # Run start on the SOURCE DB's clock, for the post-run dial true-up
+        # skip. Must not use the container clock: the two differ by an hour, so
+        # comparing a local timestamp against fpl_player_dials.updated_at would
+        # skip a true-up that was needed (or run one that wasn't).
+        _run_started_at = None
+        try:
+            _rs_conn = await get_source_connection()
+            try:
+                async with _rs_conn.cursor() as _rc:
+                    await _rc.execute("SELECT NOW()")
+                    _rs_row = await _rc.fetchone()
+                    _run_started_at = _rs_row[0] if _rs_row else None
+            finally:
+                release_source_connection(_rs_conn)
+        except Exception as _rs_err:
+            logger.warning(f"[{league}] could not read run-start time: {_rs_err}")
 
 
         ctx = await self._setup_league(league)
@@ -2428,11 +2444,39 @@ class ProjectionService:
                 # the insert above. Re-read dials fresh and recalc all dialed
                 # players from the just-written bundles — a run can then never
                 # change a dialed player's points except through his dials.
+                #
+                # SKIP when no dial changed during the run. The true-up exists
+                # only to catch a mid-run edit, but it re-scores every player in
+                # any fixture containing a dialled player — 14,260 rows — and
+                # since the bonus simulator went in that costs ~5.5 minutes,
+                # taking runs from ~21 to ~28 min. Nothing to true up in the
+                # common case. George, 2026-08-03.
                 try:
                     from app.repository.fpl_recalc_repo import load_all_dials_and_bands
                     from app.services.fpl_recalc_service import recalc_fpl_players
                     _dials_now, _ = await load_all_dials_and_bands()
-                    if _dials_now:
+                    _dials_touched = None
+                    try:
+                        _tu_conn = await get_source_connection()
+                        try:
+                            async with _tu_conn.cursor() as _tc:
+                                await _tc.execute("SELECT MAX(updated_at) FROM fpl_player_dials")
+                                _row = await _tc.fetchone()
+                                _dials_touched = _row[0] if _row else None
+                        finally:
+                            release_source_connection(_tu_conn)
+                    except Exception as _tu_probe_err:
+                        # Can't tell -> run it. Correctness over speed.
+                        logger.warning(f"[{league}] dial-change probe failed, running true-up: {_tu_probe_err}")
+                    _stale = (
+                        _dials_touched is not None
+                        and _run_started_at is not None
+                        and pd.to_datetime(_dials_touched) < pd.to_datetime(_run_started_at)
+                    )
+                    if _dials_now and _stale:
+                        logger.info(f"[{league}] post-run dial true-up SKIPPED — no dial edited since "
+                                    f"{_run_started_at} (last edit {_dials_touched})")
+                    elif _dials_now:
                         _tu = await recalc_fpl_players(list(_dials_now.keys()))
                         logger.info(f"[{league}] post-run dial true-up: "
                                     f"{_tu.get('rows_updated')} rows in {_tu.get('duration_seconds')}s")
