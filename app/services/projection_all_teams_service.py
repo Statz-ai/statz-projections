@@ -750,7 +750,10 @@ class ProjectionAllTeams:
                                 team_ids_by_name=_uni_ids,
                                 mv_index=locals().get('_uni_mv_index') or {},
                                 matches_played=matches_played,
-                                games_in_season=max(1, (len(ratings) - 1) * 2),
+                                # NB: `max`/`min` are shadowed by numpy floats in the
+                                # market-value block above, so the builtins are not
+                                # callable here. Written without them on purpose.
+                                games_in_season=((len(ratings) - 1) * 2) or 1,
                                 goals_per_game=_uni_gpg,
                             )
                         finally:
