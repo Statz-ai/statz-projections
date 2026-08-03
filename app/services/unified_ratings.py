@@ -44,8 +44,15 @@ from app.services import team_strength as ts
 
 logger = logging.getLogger("projection")
 
-# Global kill switch. Per-competition control is the caller's business.
-UNIFIED_ENABLED = os.getenv("UNIFIED_RATINGS", "1") not in ("0", "false", "False")
+# THE switch. One global flag, not a per-league toggle — George does not
+# want a manual league-by-league switchover, and the whole point of this
+# module is that every competition ends up on the same rating.
+#
+# Defaults OFF so that deploying this code changes nothing: the legacy
+# mv_beta nudge still runs and the season simulation still uses whatever
+# team_strength produced. Set UNIFIED_RATINGS=1 in the projection server's
+# environment to switch everything over, and unset it to fall straight back.
+UNIFIED_ENABLED = os.getenv("UNIFIED_RATINGS", "0") not in ("0", "false", "False")
 
 # --- weight schedule -------------------------------------------------------
 # p = fraction of the season played.
@@ -160,20 +167,38 @@ def power_devig(odds, band):
     return [(1.0 / o) ** k for o in odds]
 
 
+def _scan(lo, hi, step, err_fn):
+    """Smallest err_fn on a grid, returned as (x, err)."""
+    best, best_err = lo, 1e18
+    x = lo
+    while x <= hi:
+        e = err_fn(x)
+        if e < best_err:
+            best_err, best = e, x
+        x += step
+    return best, best_err
+
+
 def fit_points(dots, sigma):
     """The points total best explaining one team's markets, and its residual.
 
     Each market is read as P(this team's points exceed this bar), modelled
     as a normal with the given spread. Least squares over every bar the
     team is priced in.
+
+    Coarse-then-fine rather than one fine sweep of the whole range: the
+    error surface is a sum of squared differences of monotone CDFs, so it
+    is smooth and single-troughed in points, and a 1-point grid followed by
+    a 0.05 grid over the winning interval finds the same minimum for about
+    a fifteenth of the work. That matters — this runs once per team per
+    candidate sigma, so the naive version cost ~21s on the Premier League
+    alone, on every projection run.
     """
-    best, best_err, mu = None, 1e18, 5.0
-    while mu <= 125.0:
-        err = sum((_phi((mu - bar) / sigma) - p) ** 2 for bar, p in dots)
-        if err < best_err:
-            best_err, best = err, mu
-        mu += 0.05
-    return best, best_err
+    def err(mu):
+        return sum((_phi((mu - bar) / sigma) - p) ** 2 for bar, p in dots)
+
+    coarse, _ = _scan(5.0, 125.0, 1.0, err)
+    return _scan(max(5.0, coarse - 1.0), min(125.0, coarse + 1.0), 0.05, err)
 
 
 def calibrate_sigma(all_dots, lo=4.0, hi=18.0, step=0.1):
@@ -190,12 +215,14 @@ def calibrate_sigma(all_dots, lo=4.0, hi=18.0, step=0.1):
     usable = [d for d in all_dots if len(d) >= 2]
     if not usable:
         return None
-    best_s, best_err, s = None, 1e18, lo
-    while s <= hi:
-        total = sum(fit_points(d, s)[1] for d in usable)
-        if total < best_err:
-            best_err, best_s = total, s
-        s += step
+
+    def total_err(s):
+        return sum(fit_points(d, s)[1] for d in usable)
+
+    # Coarse-then-fine, same reasoning as fit_points — the residual curve
+    # measured across several leagues is a smooth single trough.
+    coarse, _ = _scan(lo, hi, 0.5, total_err)
+    best_s, _ = _scan(max(lo, coarse - 0.5), min(hi, coarse + 0.5), step, total_err)
     return round(best_s, 1)
 
 
@@ -403,23 +430,34 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
     new_attack, new_defence = [], []
     for i, team in enumerate(ratings['Team']):
         f = float(form_overall.iloc[i]) if np.isfinite(form_overall.iloc[i]) else 0.0
-        parts = [(w_form, f)]
         m = mv_overall.get(team)
-        if m is not None:
-            parts.append((w_mv, m))
         o = odds_overall.get(team)
-        if o is not None:
-            parts.append((w_odds, o))
-        # A team missing a component keeps the others in proportion rather
-        # than being dragged toward the mean by a zeroed input.
-        total_w = sum(w for w, _ in parts)
-        blended = (sum(w * v for w, v in parts) / total_w) if total_w > 0 else f
+
+        # A missing component hands its weight to FORM, never to the others.
+        #
+        # Proportional renormalising looks natural but misbehaves: 9 of the
+        # 21 leagues we project carry only a title market, so the odds
+        # component drops out, and rescaling would promote squad value from
+        # 0.30 to 0.50 — putting half the rating on the least trustworthy
+        # input precisely where we have least corroboration. Squad value is
+        # also over-dispersed in several of those leagues (Serie A spread
+        # 32.1 against form's 20.5), so it would arrive amplified as well.
+        # Form is measured from matches actually played, so it is the right
+        # place for the slack to land. (George, 2026-08-03.)
+        wf, wm, wo = w_form, w_mv, w_odds
+        if o is None:
+            wf, wo = wf + wo, 0.0
+        if m is None:
+            wf, wm = wf + wm, 0.0
+        total_w = wf + wm + wo
+        blended = ((wf * f + wm * (m or 0.0) + wo * (o or 0.0)) / total_w) if total_w > 0 else f
         delta = blended - f
         new_attack.append((float(a_idx.iloc[i]) + delta) * attack_mean / 100.0)
         new_defence.append((float(d_idx.iloc[i]) - delta) * defence_mean / 100.0)
         audit.append({
             'Team': team, 'form': f, 'mv': m, 'odds': o,
             'blended': blended, 'delta': delta,
+            'w_form': wf, 'w_mv': wm, 'w_odds': wo,
         })
 
     ratings['Attack'] = new_attack

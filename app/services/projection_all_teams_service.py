@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
+from app.services import unified_ratings
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.services.international_projection_service import InternationalProjectionService
 from app.data_loader import LeagueDataLoader
@@ -696,31 +697,69 @@ class ProjectionAllTeams:
                             logger.warning(f"[{league}] Team mapping missing — using neutral MV Index (1.0) for: {teams_to_map.tolist()} | Unmatched Transfermarkt names: {market_values_not_mapped['Team'].tolist()}")
                             ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
 
-                        total_match_perc = 38 / total_matches
-                        # mv_beta is already set above from DB config or
-                        # xlsx fallback — re-looking it up via
-                        # league_weightings_df (only assigned in the xlsx
-                        # branch) raised NameError for any league using DB
-                        # config, which the try/except below silently
-                        # swallowed → skipped MV adjustment for every run.
-                        # Same fix as projection_service.py (see comment
-                        # at the equivalent block there).
-                        mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
-
-                        ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
-                            'Attack'].mean()) * mv_beta
-                        ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-                        ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
-                            'Defense'].mean()) * mv_beta
-                        ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-                        ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-                        ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-                        ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
-                                              'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
-                                     inplace=True)
-                        logger.info(f"[{league}] Step: market value adjustments applied")
+                        _uni_mv_index = dict(zip(
+                            ratings['Team'],
+                            pd.to_numeric(ratings['MV Index'], errors='coerce'),
+                        ))
+                        if not unified_ratings.UNIFIED_ENABLED:
+                            # LEGACY mv_beta nudge — see the matching comment
+                            # in projection_service. Kept so switching the
+                            # blend off restores previous behaviour exactly.
+                            total_match_perc = 38 / total_matches
+                            mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
+                            ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
+                                'Attack'].mean()) * mv_beta
+                            ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
+                            ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
+                                'Defense'].mean()) * mv_beta
+                            ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
+                            ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
+                            ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
+                            ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance',
+                                                  'MV Defense Underperformance %', 'MV Attack Underperformance %'],
+                                         inplace=True)
+                        ratings.drop(columns=['MV Index', 'MV Index Reverse'], inplace=True)
+                        logger.info(f"[{league}] Step: market value applied "
+                                    f"({'unified blend' if unified_ratings.UNIFIED_ENABLED else 'legacy mv_beta'})")
                     except Exception as _mv_err:
                         logger.warning(f"[{league}] Market value block failed: {_mv_err} — skipping MV adjustment")
+
+                # --- UNIFIED RATING ---------------------------------------
+                # Mirrors projection_service._prepare_league. This service is
+                # a parallel copy of the same pipeline and also writes
+                # team_ratings, so leaving it on the mv_beta nudge would
+                # reintroduce exactly the two-ratings split the unified blend
+                # exists to remove. Keep the two in sync.
+                if unified_ratings.UNIFIED_ENABLED:
+                    try:
+                        _uni_ids = {}
+                        for _name in ratings['Team']:
+                            try:
+                                _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
+                            except Exception:
+                                continue
+                        _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
+                                    + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
+                        _uni_conn = await get_source_connection()
+                        try:
+                            ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
+                                _uni_conn,
+                                ratings,
+                                competition_id=league_id,
+                                season_id=current_season_id,
+                                team_ids_by_name=_uni_ids,
+                                mv_index=locals().get('_uni_mv_index') or {},
+                                matches_played=matches_played,
+                                games_in_season=max(1, (len(ratings) - 1) * 2),
+                                goals_per_game=_uni_gpg,
+                            )
+                        finally:
+                            release_source_connection(_uni_conn)
+                        logger.info(f"[{league}] Step: unified rating applied")
+                    except Exception as _uni_err:
+                        logger.warning(
+                            f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+                        )
 
                 # Snapshot post-MV, pre-rescale ratings in xG/game units.
                 ratings['Attack_xG'] = ratings['Attack']

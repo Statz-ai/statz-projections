@@ -15,6 +15,7 @@ from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.repository.dream11_repo import insert_dream11_projections_async
 from app.data_loader import LeagueDataLoader
+from app.services import unified_ratings
 from app.source_database import get_source_connection, release_source_connection
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -745,38 +746,70 @@ class ProjectionService:
                 zip(ratings['Team'], pd.to_numeric(ratings['MV Index'], errors='coerce'))
             )
 
-            total_match_perc = 38 / total_matches  # NEW - This calculates the percentage of total matches played so far in the season compared to Premier League
-            # mv_beta is already passed in from _setup_league (line 654: mv_beta = ctx.mv_beta),
-            # so no need to re-look it up from league_weightings_df here (which isn't even in scope
-            # inside _prepare_league — the old lookup was raising NameError and being silently
-            # swallowed by the MV try/except, skipping the whole MV adjustment for every run).
-            mv_beta = (mv_beta * (0.95 ** (
-                        matches_played * total_match_perc)))  # NEW - This adjusts the mv_beta based on matches played so far in the season
-            ## ratings['MV Index'] = (ratings['MV Index'] * 100).round(1) #REMOVED
-
-            # ratings['MV Underperformance'] = (ratings['MV Index'] - ratings['Overall']) * mv_beta
-            # ratings['MV Underperformance %'] = ratings['MV Underperformance'] / ratings['Overall']
-            # ratings['Attack'] = ratings['Attack'] * (1+ ratings['MV Underperformance %'])
-            # ratings['Defense'] = ratings['Defense'] * (1+ ratings['MV Underperformance %'])
-            # ratings['Overall'] = (ratings['Attack'] + ratings['Defense']) / 2
-            # ratings.drop(columns=['MV Underperformance','MV Underperformance %','MV Index'], inplace=True)
-
-            ## NEW - These lines of code are all new. They replace the code commented out above.
-
-            ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
-                'Attack'].mean()) * mv_beta
-            ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-            ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
-                'Defense'].mean()) * mv_beta
-            ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-            ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-            ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-            ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
-                                  'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
-                         inplace=True)
-            logger.info(f"[{league}] Step: market value adjustments applied")
+            if not unified_ratings.UNIFIED_ENABLED:
+                # LEGACY mv_beta nudge. Superseded by the unified blend below,
+                # kept so that turning the blend off restores the previous
+                # behaviour exactly rather than dropping squad value entirely.
+                total_match_perc = 38 / total_matches
+                mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
+                ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
+                    'Attack'].mean()) * mv_beta
+                ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
+                ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
+                    'Defense'].mean()) * mv_beta
+                ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
+                ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
+                ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
+                ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance',
+                                      'MV Defense Underperformance %', 'MV Attack Underperformance %'],
+                             inplace=True)
+            ratings.drop(columns=['MV Index', 'MV Index Reverse'], inplace=True)
+            logger.info(f"[{league}] Step: market value applied "
+                        f"({'unified blend' if unified_ratings.UNIFIED_ENABLED else 'legacy mv_beta'})")
         except Exception as _mv_err:
             logger.warning(f"[{league}] Market value block failed for {league}: {_mv_err} — skipping MV adjustment")
+
+        # --- UNIFIED RATING -------------------------------------------------
+        # Replaces the mv_beta nudge that used to sit here. That nudge tilted
+        # only the ratings driving FIXTURE predictions, while a separate
+        # team_strength blend drove the SEASON SIMULATION — so the model could
+        # project Liverpool 3rd and Brentford 10th, then make Brentford
+        # favourites when they met (George, 2026-07-31). One rating now feeds
+        # both. mv_beta and odds_beta are no longer read here; mv_beta's
+        # column stays in competition_projection_config until the old
+        # team_strength path is removed.
+        if unified_ratings.UNIFIED_ENABLED:
+            try:
+                _uni_ids = {}
+                for _name in ratings['Team']:
+                    try:
+                        _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
+                    except Exception:
+                        continue
+                _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
+                            + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
+                _uni_conn = await get_source_connection()
+                try:
+                    ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
+                        _uni_conn,
+                        ratings,
+                        competition_id=league_id,
+                        season_id=current_season_id,
+                        team_ids_by_name=_uni_ids,
+                        mv_index=(ProjectionService._strength_inputs or {}).get('mv_index') or {},
+                        matches_played=matches_played,
+                        games_in_season=max(1, (len(ratings) - 1) * 2),
+                        goals_per_game=_uni_gpg,
+                    )
+                finally:
+                    release_source_connection(_uni_conn)
+                logger.info(f"[{league}] Step: unified rating applied")
+            except Exception as _uni_err:
+                # Never fail a projection run over the blend — fall through on
+                # the form ratings, which is the pre-blend behaviour.
+                logger.warning(
+                    f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+                )
 
         # Manual operator overrides from the Projections Admin Console
         # (projections_team_dials). Applied AFTER MV adjustment and BEFORE
@@ -860,22 +893,29 @@ class ProjectionService:
     async def _resolve_sim_ratings(self, league, league_id, ratings, teams, comp_teams,
                                    fixtures_df, current_season_id, previous_season_id,
                                    matches_played):
-        """Ratings for the SEASON SIMULATION only.
+        """Ratings for the SEASON SIMULATION.
 
-        Blends the form-tilted base rating with bookmaker outright odds and
-        squad market value into a Team Strength rating (app/services/
-        team_strength.py), always computing and persisting it, but only
-        RETURNING it where the competition has opted in via
-        competition_projection_config.use_strength_ratings. That lets the two
-        be compared on real data before anything switches over.
+        RETIRED as a decision point (2026-08-03). `ratings` now arrives from
+        _prepare_league already carrying the unified blend of form, squad
+        value and outright odds, and the season simulation uses exactly that
+        — the same numbers the fixture projections use.
 
-        Everything else in a run — match projections, team_projections, props,
-        FPL — keeps using `ratings`, deliberately: form-tilting is right for
-        the next fixture and wrong for a 38-game projection.
+        The old behaviour returned a SEPARATE Team Strength rating here, so a
+        team could be projected 3rd over the season yet be the underdog when
+        those two sides actually met. That contradiction is what the unified
+        rating exists to remove, so there is no longer a choice to make.
 
-        Never raises: any failure falls back to the base ratings and logs.
+        The team_strength computation below is kept only to keep writing the
+        `team_strength_ratings` audit table while the old path is compared
+        against the new one; its output is no longer returned. Delete this
+        whole method once that comparison is done.
+
+        Never raises: any failure falls back to the passed-in ratings.
         """
         from app.services import team_strength as ts
+
+        if unified_ratings.UNIFIED_ENABLED:
+            return ratings
 
         if not ts.STRENGTH_ENABLED:
             return ratings
