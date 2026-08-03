@@ -2273,9 +2273,31 @@ class ProjectionService:
                 except Exception as _bundle_err:
                     logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
                 fpl_point_df = get_fpl_points(_fpl_frame, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
-                bps_df = bonus_points_score(_fpl_frame, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
-                from app.services.statz_functions import get_bonus_points_by_fixture
-                bonus = get_bonus_points_by_fixture(bps_df, score_preds, expo_factor=0.1)
+                # Bonus: Monte Carlo the fixture and award 3/2/1 on ranked BPS
+                # (fpl_bonus_sim), replacing the softmax over EXPECTED BPS.
+                # The old allocator sized its pool as 0.5 x count(BPS >= 7.5),
+                # which measured 3.44 per fixture on prod against FPL's 6, and
+                # gave a full unit of weight to players with xMins = 0.
+                # FPL_BONUS_SIM=0 falls back to the softmax.
+                _bonus_sim_on = os.getenv('FPL_BONUS_SIM', '1') != '0'
+                bonus = None
+                if _bonus_sim_on:
+                    try:
+                        from app.services.fpl_bonus_sim import simulate_bonus_for_frame
+                        _t_sim = time.time()
+                        bonus = simulate_bonus_for_frame(_fpl_frame, score_preds)
+                        if bonus is None or bonus.empty:
+                            raise RuntimeError("simulator returned no rows")
+                        logger.info(f"[{league}] bonus simulator: {len(bonus)} rows "
+                                    f"in {time.time() - _t_sim:.1f}s")
+                    except Exception as _sim_err:
+                        logger.warning(f"[{league}] bonus simulator failed, falling back "
+                                       f"to softmax: {_sim_err}")
+                        bonus = None
+                if bonus is None:
+                    bps_df = bonus_points_score(_fpl_frame, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
+                    from app.services.statz_functions import get_bonus_points_by_fixture
+                    bonus = get_bonus_points_by_fixture(bps_df, score_preds, expo_factor=0.1)
 
                 fpl_df = fpl_point_df.merge(bonus, on=['fixture_id', 'player_id'], how='left')
                 fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
