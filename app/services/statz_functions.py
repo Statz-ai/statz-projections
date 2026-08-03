@@ -517,6 +517,24 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
         matches = matches.merge(GA[['kickoff_datetime', 'Opponent Goals']], on='kickoff_datetime', how='left')
         matches = matches.merge(xGA[['kickoff_datetime', 'Opponent Expected Goals (xG)']], on='kickoff_datetime',
                                 how='left')
+        # A missing xG arrives here as 0, not NaN — get_team_stats fills
+        # absent stat values with 0 (see its `value.fillna(0)`), which is the
+        # right default for counting stats like corners and is deliberately
+        # left alone. The consequence was that the two fillna lines below
+        # never fired, so any league holding goals but no xG was rated on
+        #     0.3 x goals + 0.7 x 0  =  30% of the truth.
+        # That hit exactly the leagues we use as the tier below: Serie B,
+        # La Liga 2 and the National League. Their promoted sides came into
+        # Serie A / La Liga / League Two rated at a third of their real
+        # strength — Monza at 0.34 goals a game against a true 1.13 — which
+        # produced simulated seasons where they scored 10 and conceded 20.
+        # Measured 2026-08-03: every affected team moved by exactly 1/0.3.
+        #
+        # Treat a zero as absent. Real xG is never exactly 0.00, and if it
+        # ever were, the fallback substitutes that match's goals, which for
+        # a goalless game is also 0 — so it lands in the same place anyway.
+        matches.loc[matches['Team Expected Goals (xG)'] == 0, 'Team Expected Goals (xG)'] = float('nan')
+        matches.loc[matches['Opponent Expected Goals (xG)'] == 0, 'Opponent Expected Goals (xG)'] = float('nan')
         matches['Team Expected Goals (xG)'].fillna(matches['Team Goals'], inplace=True)
         matches['Opponent Expected Goals (xG)'].fillna(matches['Opponent Goals'], inplace=True)
         matches['Adjusted Goals'] = matches['Team Goals'] * 0.3 + matches[
