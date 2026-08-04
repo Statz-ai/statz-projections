@@ -7,11 +7,10 @@ from typing import Any
 _PROJ_LOGGER = logging.getLogger("projection")
 
 # --- form decay ------------------------------------------------------------
+# 'power' (default): (age_weeks + 4) ** -0.418, anchored to TODAY.
 # 'exp'   the original: weight ** (weeks since the TEAM'S LAST GAME - 3),
-#         flat inside 4 weeks. Freezes between seasons and jumps at GW1.
-# 'power' (age_weeks + 4) ** -0.418, anchored to TODAY.
-# Defaults to 'exp' so nothing changes until the comparison is signed off.
-FORM_DECAY_MODE = os.getenv("FORM_DECAY", "exp")
+#         flat inside 4 weeks. Kept as an escape hatch — set FORM_DECAY=exp.
+FORM_DECAY_MODE = os.getenv("FORM_DECAY", "power")
 FORM_DECAY_K = float(os.getenv("FORM_DECAY_K", "0.418"))
 FORM_DECAY_OFFSET = float(os.getenv("FORM_DECAY_OFFSET", "4.0"))
 
