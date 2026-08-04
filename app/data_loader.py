@@ -942,7 +942,7 @@ class LeagueDataLoader:
         # non-NULL REPLACES the model value at FPL assembly. All fractions 0-1.
         self.fpl_player_dials = await self._sql_to_df(
             conn,
-            "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_pct FROM fpl_player_dials",
+            "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_share FROM fpl_player_dials",
         )
         self.projection_config = await self._sql_to_df(
             conn,

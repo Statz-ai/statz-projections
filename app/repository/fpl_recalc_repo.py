@@ -30,6 +30,13 @@ BUNDLE_COLS = [
     'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average',
     'Tackles Won Average', 'CBIT Average', 'CBIT Hit Rate',
     'Full Match Hit Rate', 'def_con_pct',
+    # The assembled defensive-contribution rate per 90 (CBIT for DEF, CBIT +
+    # recoveries for MID/FWD, or the defcon_share dial where set). Banked as
+    # ONE column rather than its components so recalc can re-band the DefCon
+    # threshold when a minutes dial moves, without re-deriving the
+    # position-dependent denominator. Without it recalc left def_con_pct stale
+    # on every band edit. George, 2026-08-04.
+    'dc_rate90',
     'xmin_p_play', 'xmin_p60', 'xmin_p90', 'xmin_bands', 'xmin_start_len',
 ] + [
     # Per-90 companions (xminutes.PER90_SUFFIX). The bonus simulator samples a
@@ -166,7 +173,7 @@ async def load_all_dials_and_bands():
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_pct FROM fpl_player_dials"
+                "SELECT player_id, p_play, p60, p90, goal_share, assist_share, defcon_share FROM fpl_player_dials"
             )
             dials = {int(r[0]): r[1:] for r in await cur.fetchall()}
             await cur.execute("SELECT player_id, p_play, p60, p90 FROM fpl_player_bands")

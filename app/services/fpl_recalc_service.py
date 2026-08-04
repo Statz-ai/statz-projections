@@ -36,7 +36,10 @@ from app.services.fpl_scoring_constants import (
 from app.services.statz_functions import (
     get_fpl_points,
 )
-from app.services.xminutes import bands_to_xmins, XMIN_SCALED_STAT_COLS
+from app.services.xminutes import (
+    bands_to_xmins, XMIN_SCALED_STAT_COLS, DC_RATE_COL,
+    defcon_threshold, defcon_band_hit_rate,
+)
 
 logger = logging.getLogger("fpl_recalc")
 
@@ -87,9 +90,32 @@ def _apply_dials_to_player(frame, mask, dial, model_band, team_stats):
             team_proj = _f((team_stats.get(fid, {}).get(team, {}) or {}).get(stat_col), 0.0) or 0.0
             frame.at[idx, stat_col] = team_proj * dial_val * new_bands / 90.0
 
-    if d_defcon is not None:
-        frame.loc[mask, 'CBIT Hit Rate'] = d_defcon
-        frame.loc[mask, 'def_con_pct'] = round(d_defcon * 100, 2)
+    # Defensive contribution. defcon_share is a share of the team's DC total
+    # (CBIT for DEF, CBIT + recoveries for MID/FWD), so it becomes a RATE and
+    # then bands like any other — it is not a flat percentage override.
+    # Re-banded even with NO dc dial, because a MINUTES dial changes the band
+    # weights and the threshold is not linear in minutes; skipping that left
+    # def_con_pct stale on every band edit.
+    if DC_RATE_COL in frame.columns:
+        for idx in frame.index[mask]:
+            pos = frame.at[idx, 'FPL Position'] if 'FPL Position' in frame.columns else None
+            threshold = defcon_threshold(pos)
+            if threshold is None:
+                continue
+            if d_defcon is not None:
+                fid = int(frame.at[idx, 'fixture_id'])
+                team = str(frame.at[idx, 'Team'])
+                _ts = (team_stats.get(fid, {}).get(team, {}) or {})
+                team_total = _f(_ts.get('Clearances Blocks Interceptions Tackles (FPL)'), 0.0) or 0.0
+                if pos != 'DEF':
+                    team_total += _f(_ts.get('Ball Recovery'), 0.0) or 0.0
+                rate90 = team_total * d_defcon
+                frame.at[idx, DC_RATE_COL] = rate90
+            else:
+                rate90 = _f(frame.at[idx, DC_RATE_COL], 0.0) or 0.0
+            hit = defcon_band_hit_rate(rate90, p_play, p60, p90, threshold)
+            frame.at[idx, 'CBIT Hit Rate'] = hit
+            frame.at[idx, 'def_con_pct'] = round(hit * 100, 2)
 
     return new_bands
 

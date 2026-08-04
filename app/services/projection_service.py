@@ -2002,7 +2002,12 @@ class ProjectionService:
                 _TD_DISPERSION = 1.0
                 # Imported, not re-spelled: these columns only exist because
                 # apply_per90_scaling stamps them, so the suffix must track it.
-                from app.services.xminutes import PER90_SUFFIX as _TD_P90_SUFFIX
+                from app.services.xminutes import (
+                    PER90_SUFFIX as _TD_P90_SUFFIX,
+                    DC_DIAL_RATE_COL as _TD_DC_DIAL_COL,
+                    DC_RATE_COL as _TD_DC_RATE_COL,
+                    defcon_band_hit_rate as _td_band_hit_rate,
+                )
                 def _td_safe(v):
                     if v is None or pd.isna(v):
                         return 0.0
@@ -2040,6 +2045,30 @@ class ProjectionService:
                         cbit += _td_safe(row.get('Ball Recovery' + suffix))
                     return cbit
 
+                def _td_dc_rate90(row):
+                    """Defensive-contribution rate per 90 — the quantity the
+                    threshold is scored against, before minutes.
+
+                    A defcon_share dial replaces it outright (replacement, not
+                    delta — same contract as goal_share). apply_share_dials
+                    writes that as team defensive-contribution total x dial, so
+                    it already varies by fixture; minutes are applied by the
+                    banding, not here.
+                    """
+                    pos = row.get('FPL Position')
+                    if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
+                        return 0.0
+                    _dialled = row.get(_TD_DC_DIAL_COL)
+                    if _dialled is not None and not (isinstance(_dialled, float) and pd.isna(_dialled)):
+                        return float(_dialled)
+                    rate = _td_cbit_total(row, pos, _TD_P90_SUFFIX)
+                    if rate > 0:
+                        return rate
+                    # Provisional pre-xMinutes pass: no per-90 companions exist
+                    # yet, so fall back to lambda at expected minutes. Overwritten
+                    # by the post-scaling recompute, which is what ships.
+                    return _td_cbit_total(row, pos)
+
                 def _td_cbit_hit_rate(row):
                     pos = row.get('FPL Position')
                     if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
@@ -2066,27 +2095,22 @@ class ProjectionService:
                     # one out. Bands are read post-dial and post-availability
                     # flag, so a dialled player bands on the value George set.
                     # George, 2026-08-04.
-                    rate90 = _td_cbit_total(row, pos, _TD_P90_SUFFIX)
+                    # A defcon_share dial replaces the assembled rate outright
+                    # (replacement, not delta — same contract as goal_share).
+                    # apply_share_dials writes it as team defensive-contribution
+                    # total x dial, so it already varies by fixture; minutes are
+                    # still applied by the banding below.
                     p_play = row.get('xmin_p_play')
                     p60 = row.get('xmin_p60')
                     p90 = row.get('xmin_p90')
-                    _have_bands = not any(
-                        v is None or (isinstance(v, float) and pd.isna(v))
-                        for v in (p_play, p60, p90)
-                    )
-                    if rate90 > 0 and _have_bands:
-                        p_play = float(p_play)
-                        p60 = min(float(p60), p_play)
-                        p90 = min(float(p90), p60)
-                        return (
-                            p90 * _td_tail(rate90, threshold)
-                            + max(0.0, p60 - p90) * _td_tail(rate90 * 75.0 / 90.0, threshold)
-                            + max(0.0, p_play - p60) * _td_tail(rate90 * 30.0 / 90.0, threshold)
-                        )
-                    # Provisional pre-xMinutes pass (no per-90 companions yet):
-                    # single-point lambda. Overwritten by the recompute after
-                    # scaling, which is the value that ships.
-                    return _td_tail(_td_cbit_total(row, pos), threshold)
+                    if any(v is None or (isinstance(v, float) and pd.isna(v))
+                           for v in (p_play, p60, p90)):
+                        # Provisional pre-xMinutes pass: no bands on the frame
+                        # yet, so score the single-point lambda. Overwritten by
+                        # the post-scaling recompute, which is what ships.
+                        return _td_tail(_td_cbit_total(row, pos), threshold)
+                    return _td_band_hit_rate(_td_dc_rate90(row), p_play, p60, p90,
+                                             threshold, _TD_DISPERSION)
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
                 # Phase 2 persistence: store the percentage form of CBIT
                 # Hit Rate so the fantasy API can surface it as
@@ -2287,13 +2311,22 @@ class ProjectionService:
                             logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
                                         f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
 
-                        # Team-down DC hit rate recomputed on the exposure-
-                        # scaled inputs so def_con_pct is minutes-aware too.
+                        # §12 Phase 5: share/defcon dials — replacement at
+                        # assembly, after per-90 scaling. Runs BEFORE the DC
+                        # recompute (it used to run after): defcon_share is a
+                        # share of the team's defensive-contribution total, so
+                        # it feeds the hit rate as a RATE and must be in place
+                        # before the threshold maths runs. George, 2026-08-04.
+                        _fpl_frame = apply_share_dials(_fpl_frame, _fpl_dials, team_projections)
+                        # Team-down DC hit rate on the exposure-scaled inputs so
+                        # def_con_pct is minutes-aware, and on the dialled rate
+                        # where a dial is set. The rate is banked as its own
+                        # column first — .apply(axis=1) hands the function a COPY
+                        # of each row, so a function that tried to stash it back
+                        # onto `row` would silently write nothing.
+                        _fpl_frame[_TD_DC_RATE_COL] = _fpl_frame.apply(_td_dc_rate90, axis=1)
                         _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
                         _fpl_frame['def_con_pct'] = (_fpl_frame['CBIT Hit Rate'] * 100).round(2)
-                        # §12 Phase 5: share/defcon dials — replacement at
-                        # assembly, after scaling + CBIT recompute.
-                        _fpl_frame = apply_share_dials(_fpl_frame, _fpl_dials, team_projections)
                         logger.info(f"[{league}] FPL xMinutes: profiles for {len(_xm_profiles)} "
                                     f"players ({time.time()-_t_xm:.1f}s)")
                     except Exception as _xm_err:

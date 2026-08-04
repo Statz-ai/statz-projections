@@ -487,22 +487,128 @@ def apply_share_dials(frame, dials_df, team_predictions):
                 frame.loc[mask, stat_col + PER90_SUFFIX] = _dialled_per90
             logger.info("xMinutes dials: %s replaced for %d players", dial_col, len(dial_map))
 
-    dc_map = {
-        int(r.player_id): float(r.defcon_pct)
-        for r in dials_df.itertuples(index=False)
-        if not pd.isna(r.defcon_pct)
-    }
-    if dc_map:
-        mask = frame["player_id"].map(lambda p: pd.notna(p) and int(p) in dc_map)
-        if mask.any():
-            dc_vals = frame.loc[mask, "player_id"].map(lambda p: dc_map[int(p)])
-            if "CBIT Hit Rate" in frame.columns:
-                frame.loc[mask, "CBIT Hit Rate"] = dc_vals
-            if "def_con_pct" in frame.columns:
-                frame.loc[mask, "def_con_pct"] = (dc_vals * 100).round(2)
-            logger.info("xMinutes dials: defcon_pct replaced for %d players", len(dc_map))
+    _apply_defcon_share(frame, dials_df, team_predictions)
 
     return frame.drop(columns=[f"_team_{c}" for c in team_cols], errors="ignore")
+
+
+DC_THRESHOLD_DEF = 10
+DC_THRESHOLD_MID_FWD = 12
+
+
+def defcon_threshold(pos):
+    """FPL defensive-contribution threshold. GK have none."""
+    if pos == 'GK' or pos is None:
+        return None
+    return DC_THRESHOLD_DEF if pos == 'DEF' else DC_THRESHOLD_MID_FWD
+
+
+def defcon_band_hit_rate(rate90, p_play, p60, p90, threshold, dispersion=1.0):
+    """P(player reaches the DC threshold), weighted across minutes bands.
+
+    Reaching the threshold is a tail event and the tail is CONVEX in lambda, so
+    E[P(hit | minutes)] != P(hit | E[minutes]). Scaling the rate to average
+    minutes and asking once invents a half-length player who never takes the
+    pitch — he either starts and has a real chance, or does not play and has
+    none. Bands at 90/75/30 to match bands_to_xmins.
+
+    Shared by the full run and the recalc path so a dial edit can never score
+    on different maths from the run that produced the row.
+    """
+    from scipy.stats import poisson as _poisson, nbinom as _nbinom
+
+    def _tail(lam):
+        if lam <= 0:
+            return 0.0
+        if dispersion <= 1.0001:
+            return float(_poisson.sf(threshold - 1, lam))
+        r = lam / (dispersion - 1.0)
+        p = r / (r + lam)
+        return float(_nbinom.sf(threshold - 1, r, p))
+
+    if rate90 is None or rate90 <= 0 or threshold is None:
+        return 0.0
+    p_play = float(p_play)
+    p60 = min(float(p60), p_play)
+    p90 = min(float(p90), p60)
+    return (
+        p90 * _tail(rate90)
+        + max(0.0, p60 - p90) * _tail(rate90 * 75.0 / 90.0)
+        + max(0.0, p_play - p60) * _tail(rate90 * 30.0 / 90.0)
+    )
+
+
+# Column apply_share_dials writes the dialled defensive-contribution RATE into
+# (per 90 minutes). The DC hit rate reads it in preference to the assembled
+# rate; absent means no dial. Not persisted — assembly-local.
+DC_DIAL_RATE_COL = "_dc_dial_rate90"
+
+# The assembled defensive-contribution rate per 90 actually used for the
+# threshold. Banked onto the frame and into the assembly bundle so the recalc
+# path can re-band it when a minutes dial moves, instead of leaving
+# def_con_pct stale.
+DC_RATE_COL = "dc_rate90"
+
+# Team columns making up the defensive-contribution total a player is dialled
+# a share OF. DEF are scored on CBIT alone; MID/FWD add recoveries, which is
+# why this is "defensive contribution share" and not "CBIT share" — the
+# denominator differs by position, so one flat name would mislead for two
+# thirds of the outfield. George, 2026-08-04.
+_DC_TEAM_CBIT = "Clearances Blocks Interceptions Tackles (FPL)"
+_DC_TEAM_RECOVERIES = "Ball Recovery"
+
+
+def _apply_defcon_share(frame, dials_df, team_predictions):
+    """defcon_share: the player's share of his team's defensive-contribution
+    total, converted to a per-90 rate for the banded threshold maths.
+
+    Replaces the old defcon_pct dial, which overwrote the hit rate with a flat
+    percentage — the same number whether Liverpool played City away or Ipswich
+    at home, when the whole point of the team-down model is that the fixture
+    moves the total. A share flexes with the opponent and venue for free, and
+    the minutes bands still apply on top.
+
+    Mutates `frame` in place, adding DC_DIAL_RATE_COL for dialled players only.
+    """
+    if "defcon_share" not in getattr(dials_df, "columns", []):
+        return
+    dc_map = {
+        int(r.player_id): float(r.defcon_share)
+        for r in dials_df.itertuples(index=False)
+        if not pd.isna(r.defcon_share)
+    }
+    if not dc_map:
+        return
+    want = [c for c in (_DC_TEAM_CBIT, _DC_TEAM_RECOVERIES) if c in team_predictions.columns]
+    if _DC_TEAM_CBIT not in want:
+        logger.warning(
+            "xMinutes dials: defcon_share set for %d players but team "
+            "'%s' is absent — dial ignored this run", len(dc_map), _DC_TEAM_CBIT
+        )
+        return
+    tp = team_predictions[["fixture_id", "Team"] + want].rename(
+        columns={c: f"_dcteam_{c}" for c in want}
+    ).drop_duplicates(subset=["fixture_id", "Team"])
+    merged = frame.merge(tp, on=["fixture_id", "Team"], how="left")
+
+    team_cbit = pd.to_numeric(merged[f"_dcteam_{_DC_TEAM_CBIT}"], errors="coerce").fillna(0.0)
+    if _DC_TEAM_RECOVERIES in want:
+        team_rec = pd.to_numeric(merged[f"_dcteam_{_DC_TEAM_RECOVERIES}"], errors="coerce").fillna(0.0)
+    else:
+        team_rec = pd.Series(0.0, index=merged.index)
+    # DEF are scored on CBIT only; MID/FWD on CBIT + recoveries. GK have no
+    # defensive contribution, so a dial on one is a no-op by construction.
+    is_def = merged.get("FPL Position").eq("DEF") if "FPL Position" in merged.columns else False
+    team_total = team_cbit.where(is_def, team_cbit + team_rec)
+
+    dial = merged["player_id"].map(lambda p: dc_map.get(int(p)) if pd.notna(p) else None)
+    dial = pd.to_numeric(dial, errors="coerce")
+    rate90 = (team_total * dial).where(dial.notna())
+    frame[DC_DIAL_RATE_COL] = rate90.to_numpy()
+    logger.info(
+        "xMinutes dials: defcon_share applied for %d players (%d rows)",
+        len(dc_map), int(rate90.notna().sum()),
+    )
 
 
 def apply_per90_scaling(frame, m_bar_by_player_stat):
