@@ -6,6 +6,15 @@ from typing import Any
 
 _PROJ_LOGGER = logging.getLogger("projection")
 
+# --- form decay ------------------------------------------------------------
+# 'exp'   the original: weight ** (weeks since the TEAM'S LAST GAME - 3),
+#         flat inside 4 weeks. Freezes between seasons and jumps at GW1.
+# 'power' (age_weeks + 4) ** -0.418, anchored to TODAY.
+# Defaults to 'exp' so nothing changes until the comparison is signed off.
+FORM_DECAY_MODE = os.getenv("FORM_DECAY", "exp")
+FORM_DECAY_K = float(os.getenv("FORM_DECAY_K", "0.418"))
+FORM_DECAY_OFFSET = float(os.getenv("FORM_DECAY_OFFSET", "4.0"))
+
 # Sportmonks pre-creates knockout-final fixture rows with placeholder team
 # names like 'TBC', 'Winner Semi-final 1', 'Winner Match 73' (see e.g. EFL
 # playoff finals before semis resolve, or WC/Euros brackets pre-draw — also
@@ -568,11 +577,36 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
         if weightings[0] and weightings[1]:
             matches.loc[matches['season_id'] == all_season_ids[2], 'Adjusted Goals'] *= weightings[0]
             matches.loc[matches['season_id'] == all_season_ids[2], 'Adjusted Goals Against'] /= weightings[1]
-        matches['Weeks Since Game'] = (pd.to_datetime(matches['kickoff_datetime'].max()) - pd.to_datetime(
-            matches['kickoff_datetime'])).dt.days // 7
-        matches['Game Weight'] = weight ** (matches['Weeks Since Game'] - 3)  # UPDATED - changed to -3
-        matches.loc[
-            matches['Weeks Since Game'] < 4, 'Game Weight'] = 1  # NEW - set weight to 1 for games within last 4 weeks
+        if FORM_DECAY_MODE == 'power':
+            # Power law anchored to TODAY, not to the team's last fixture.
+            #
+            # Two faults in the exponential version below, both from that
+            # anchor. (1) Ratings FREEZE between seasons: measured 2026-08-02
+            # by running get_ratings as of 25 May against today with the
+            # Championship squad — every team identical to 0.0, because three
+            # months of nothing changes no team's own last-game distance.
+            # (2) A GW1 CLIFF: when a new match lands the anchor jumps, so a
+            # January game "ages" eleven weeks overnight and its weight falls
+            # 0.500 -> 0.319 though only one real week passed.
+            #
+            # A power law fixes both without a staleness patch. Games age one
+            # week per week, and because the curve flattens as the sample
+            # ages, pre-season ratings converge toward a season average
+            # instead of staying a photograph of the run-in. K = 0.418 sets
+            # the mid-season half-life to ~17 weeks, matching the 0.96 curve,
+            # so in-season behaviour is nearly unchanged and the difference
+            # is all in the tail.
+            _age_weeks = (pd.to_datetime('today') - pd.to_datetime(
+                matches['kickoff_datetime'])).dt.days / 7.0
+            _age_weeks = _age_weeks.clip(lower=0.0)
+            matches['Weeks Since Game'] = _age_weeks
+            matches['Game Weight'] = (_age_weeks + FORM_DECAY_OFFSET) ** (-FORM_DECAY_K)
+        else:
+            matches['Weeks Since Game'] = (pd.to_datetime(matches['kickoff_datetime'].max()) - pd.to_datetime(
+                matches['kickoff_datetime'])).dt.days // 7
+            matches['Game Weight'] = weight ** (matches['Weeks Since Game'] - 3)  # UPDATED - changed to -3
+            matches.loc[
+                matches['Weeks Since Game'] < 4, 'Game Weight'] = 1  # NEW - set weight to 1 for games within last 4 weeks
         matches['Weighted Goals'] = matches['Adjusted Goals'] * matches['Game Weight']
         matches['Weighted Goals Against'] = matches['Adjusted Goals Against'] * matches['Game Weight']
         attack_rating = matches['Weighted Goals'].sum() / matches['Game Weight'].sum()

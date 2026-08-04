@@ -228,7 +228,7 @@ class ProjectionAllTeams:
                     league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
                     country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
                     div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
-                    mv_beta = float(r.get('mv_beta', 0.15))
+                    mv_beta = float(r.get('mv_beta', unified_ratings.W_MV_PRE))
                     odds_beta = float(r.get('odds_beta', 0.3))
                     weightings = [league_above_attack_weight, league_above_defense_weight,
                                   league_below_attack_weight, league_below_defense_weight]
@@ -264,7 +264,7 @@ class ProjectionAllTeams:
                         league_above_defense_weight = 1.0
                         country_code = None
                         div = None
-                        mv_beta = 0.0
+                        mv_beta = unified_ratings.W_MV_PRE
                         odds_beta = 1.0
                         weightings = [1.0, 1.0, 1.0, 1.0]
                         logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
@@ -701,26 +701,8 @@ class ProjectionAllTeams:
                             ratings['Team'],
                             pd.to_numeric(ratings['MV Index'], errors='coerce'),
                         ))
-                        if not unified_ratings.UNIFIED_ENABLED:
-                            # LEGACY mv_beta nudge — see the matching comment
-                            # in projection_service. Kept so switching the
-                            # blend off restores previous behaviour exactly.
-                            total_match_perc = 38 / total_matches
-                            mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
-                            ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
-                                'Attack'].mean()) * mv_beta
-                            ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-                            ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
-                                'Defense'].mean()) * mv_beta
-                            ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-                            ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-                            ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-                            ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance',
-                                                  'MV Defense Underperformance %', 'MV Attack Underperformance %'],
-                                         inplace=True)
                         ratings.drop(columns=['MV Index', 'MV Index Reverse'], inplace=True)
-                        logger.info(f"[{league}] Step: market value applied "
-                                    f"({'unified blend' if unified_ratings.UNIFIED_ENABLED else 'legacy mv_beta'})")
+                        logger.info(f"[{league}] Step: market value index built")
                     except Exception as _mv_err:
                         logger.warning(f"[{league}] Market value block failed: {_mv_err} — skipping MV adjustment")
 
@@ -730,39 +712,39 @@ class ProjectionAllTeams:
                 # team_ratings, so leaving it on the mv_beta nudge would
                 # reintroduce exactly the two-ratings split the unified blend
                 # exists to remove. Keep the two in sync.
-                if unified_ratings.UNIFIED_ENABLED:
-                    try:
-                        _uni_ids = {}
-                        for _name in ratings['Team']:
-                            try:
-                                _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
-                            except Exception:
-                                continue
-                        _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-                                    + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
-                        _uni_conn = await get_source_connection()
+                try:
+                    _uni_ids = {}
+                    for _name in ratings['Team']:
                         try:
-                            ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
-                                _uni_conn,
-                                ratings,
-                                competition_id=league_id,
-                                season_id=current_season_id,
-                                team_ids_by_name=_uni_ids,
-                                mv_index=locals().get('_uni_mv_index') or {},
-                                matches_played=matches_played,
-                                # NB: `max`/`min` are shadowed by numpy floats in the
-                                # market-value block above, so the builtins are not
-                                # callable here. Written without them on purpose.
-                                games_in_season=((len(ratings) - 1) * 2) or 1,
-                                goals_per_game=_uni_gpg,
-                            )
-                        finally:
-                            release_source_connection(_uni_conn)
-                        logger.info(f"[{league}] Step: unified rating applied")
-                    except Exception as _uni_err:
-                        logger.warning(
-                            f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+                            _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
+                        except Exception:
+                            continue
+                    _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
+                                + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
+                    _uni_conn = await get_source_connection()
+                    try:
+                        ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
+                            _uni_conn,
+                            ratings,
+                            competition_id=league_id,
+                            season_id=current_season_id,
+                            team_ids_by_name=_uni_ids,
+                            mv_index=locals().get('_uni_mv_index') or {},
+                            matches_played=matches_played,
+                            # NB: `max`/`min` are shadowed by numpy floats in the
+                            # market-value block above, so the builtins are not
+                            # callable here. Written without them on purpose.
+                            games_in_season=((len(ratings) - 1) * 2) or 1,
+                            goals_per_game=_uni_gpg,
+                            mv_weight_pre=mv_beta,
                         )
+                    finally:
+                        release_source_connection(_uni_conn)
+                    logger.info(f"[{league}] Step: unified rating applied")
+                except Exception as _uni_err:
+                    logger.warning(
+                        f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+                    )
 
                 # Snapshot post-MV, pre-rescale ratings in xG/game units.
                 ratings['Attack_xG'] = ratings['Attack']

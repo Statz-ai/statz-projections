@@ -183,6 +183,11 @@ class LeagueDataLoader:
             await self._load_team_stats(conn)
             await self._load_player_stats(conn)
             await self._overlay_fpl_stats(conn)
+            # Sportmonks fallback for CBIT + team-level recoveries. Runs for EVERY
+            # league (the FPL overlay above is PL-only), so a promoted player's
+            # Championship history carries defensive data instead of collapsing to
+            # a ~0 share. Must come AFTER the overlay: FPL keeps precedence on PL.
+            self._derive_cbit_from_components()
             self._load_local_files()
             self._loaded = True
             logger.info(
@@ -1041,6 +1046,110 @@ class LeagueDataLoader:
         logger.info(
             "[loader] fpl_player_mappings gated to current FPL squad: %d players",
             len(self.fpl_player_mappings),
+        )
+
+    # Sportmonks stat_type ids for the CBIT components. Resolved by name at
+    # runtime rather than hardcoded, but listed here for reference.
+    _CBIT_COMPONENTS = ("Clearances", "Blocked Shots", "Interceptions", "Tackles")
+
+    def _derive_cbit_from_components(self) -> None:
+        """Build CBIT + roll up Ball Recovery to team level for EVERY league.
+
+        Why this exists: the combined CBIT stat (999003) and team-level Ball
+        Recovery are both produced by the FPL overlay, which is Premier League
+        only. A PL run loads a promoted player's Championship history, but that
+        history carries no CBIT and no team-level recoveries — so his share
+        collapsed to ~0 and no Coventry, Hull or Ipswich player could appear in
+        the DefCon rankings at all. George spotted their absence.
+
+        Sportmonks has the parts everywhere. Championship coverage checked
+        2026-08-04: derived team CBIT mean 57.5 (PL 54.6), derived team
+        recoveries mean 47.5 (PL 46.2) — close enough that a promoted player's
+        history transfers meaningfully. FPL and Sportmonks also agree on PL
+        CBIT to 0.3%, so the two sources are interchangeable.
+
+        Runs AFTER _overlay_fpl_stats so FPL keeps precedence on PL fixtures:
+        only (player, fixture) pairs with no CBIT row get one derived here.
+
+        Sportmonks stores no zero rows, so a component with no row means the
+        player genuinely did none — absent is summed as 0, not as missing.
+        """
+        if self.player_stats is None or self.player_stats.empty:
+            return
+        if self.team_stats is None:
+            return
+
+        def _sid(name):
+            m = self.stats_types[self.stats_types["name"] == name]
+            return int(m["id"].iloc[0]) if not m.empty else None
+
+        cbit_id = _sid("Clearances Blocks Interceptions Tackles (FPL)")
+        rec_id = _sid("Ball Recovery")
+        comp_ids = [i for i in (_sid(n) for n in self._CBIT_COMPONENTS) if i is not None]
+        if cbit_id is None or not comp_ids:
+            logger.warning("[CBIT derive] missing stats_types — skipped")
+            return
+
+        ps = self.player_stats
+        ps["value"] = pd.to_numeric(ps["value"], errors="coerce")
+
+        # ---- player-level CBIT where absent -------------------------------
+        have = set(
+            map(tuple, ps.loc[ps["stats_type_id"] == cbit_id, ["player_id", "fixture_id"]].values)
+        )
+        comp = ps[ps["stats_type_id"].isin(comp_ids)]
+        derived = (
+            comp.groupby(["player_id", "fixture_id", "team_id"], as_index=False)["value"]
+            .sum()
+        )
+        if not derived.empty and have:
+            derived = derived[
+                ~derived.apply(lambda r: (r["player_id"], r["fixture_id"]) in have, axis=1)
+            ]
+        n_player = 0
+        if not derived.empty:
+            new_rows = pd.DataFrame({
+                "player_id": derived["player_id"].astype("int64"),
+                "fixture_id": derived["fixture_id"].astype("int64"),
+                "team_id": derived["team_id"].astype("int64"),
+                "stats_type_id": cbit_id,
+                "value": derived["value"].astype(float),
+            })
+            self.player_stats = pd.concat([ps, new_rows], ignore_index=True)
+            ps = self.player_stats
+            n_player = len(new_rows)
+
+        # ---- team-level roll-up for CBIT and Ball Recovery ----------------
+        n_team = 0
+        for stat_id, label in ((cbit_id, "CBIT"), (rec_id, "Recoveries")):
+            if stat_id is None:
+                continue
+            agg = (
+                ps[ps["stats_type_id"] == stat_id]
+                .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+            )
+            if agg.empty:
+                continue
+            ts = self.team_stats
+            existing = set(
+                map(tuple, ts.loc[ts["stats_type_id"] == stat_id, ["fixture_id", "team_id"]].values)
+            )
+            fresh = agg[
+                ~agg.apply(lambda r: (r["fixture_id"], r["team_id"]) in existing, axis=1)
+            ] if existing else agg
+            if fresh.empty:
+                continue
+            self.team_stats = pd.concat([ts, pd.DataFrame({
+                "fixture_id": fresh["fixture_id"].astype("int64"),
+                "team_id": fresh["team_id"].astype("int64"),
+                "stats_type_id": stat_id,
+                "value": fresh["value"].astype(float),
+            })], ignore_index=True)
+            n_team += len(fresh)
+
+        logger.info(
+            "[CBIT derive] player rows added %d, team rows added %d (all leagues)",
+            n_player, n_team,
         )
 
     def _load_local_files(self) -> None:

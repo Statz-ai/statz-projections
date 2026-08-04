@@ -44,15 +44,12 @@ from app.services import team_strength as ts
 
 logger = logging.getLogger("projection")
 
-# THE switch. One global flag, not a per-league toggle — George does not
-# want a manual league-by-league switchover, and the whole point of this
-# module is that every competition ends up on the same rating.
-#
-# Defaults OFF so that deploying this code changes nothing: the legacy
-# mv_beta nudge still runs and the season simulation still uses whatever
-# team_strength produced. Set UNIFIED_RATINGS=1 in the projection server's
-# environment to switch everything over, and unset it to fall straight back.
-UNIFIED_ENABLED = os.getenv("UNIFIED_RATINGS", "0") not in ("0", "false", "False")
+# Retired 2026-08-04. This was the rollout switch while the legacy mv_beta
+# nudge still existed alongside; that path is now deleted, so there is
+# nothing to fall back to and the flag has no meaningful "off" state.
+# Kept as a constant so any straggling reference still reads True rather
+# than silently disabling the only rating the pipeline has.
+UNIFIED_ENABLED = True
 
 # --- weight schedule -------------------------------------------------------
 # p = fraction of the season played.
@@ -156,8 +153,18 @@ def relegation_places(competition_id):
     return 3
 
 
-def blend_weights(matches_played, games_in_season):
-    """(form, MV, odds) weights at this point in the season."""
+def blend_weights(matches_played, games_in_season, mv_pre=None):
+    """(form, MV, odds) weights at this point in the season.
+
+    `mv_pre` is squad value's PRE-SEASON weight and is set per competition
+    (competition_projection_config.mv_beta), because money predicts the
+    table far better in some leagues than others. Measured 2026-08-03
+    against each league's last completed season: correlation runs from 0.95
+    in Liga Portugal down to 0.57 in League One, and in the lower EFL squad
+    value is close to noise while carrying the widest spread of any
+    component — which is how York City's manual prior of 1.68 attack came
+    out at 1.45. Defaults to W_MV_PRE when not supplied.
+    """
     if not games_in_season or games_in_season <= 0:
         p = 0.0
     else:
@@ -165,7 +172,8 @@ def blend_weights(matches_played, games_in_season):
     w_odds = max(W_ODDS_MIN, W_ODDS_PRE - (W_ODDS_PRE - W_ODDS_MIN) * (p / MV_FADE_BY)) \
         if MV_FADE_BY > 0 else W_ODDS_MIN
     w_odds = max(W_ODDS_MIN, min(W_ODDS_PRE, w_odds))
-    w_mv = W_MV_PRE * max(0.0, 1.0 - (p / MV_FADE_BY)) if MV_FADE_BY > 0 else 0.0
+    mv_pre = W_MV_PRE if mv_pre is None else float(mv_pre)
+    w_mv = mv_pre * max(0.0, 1.0 - (p / MV_FADE_BY)) if MV_FADE_BY > 0 else 0.0
     w_form = max(0.0, 1.0 - w_odds - w_mv)
     return w_form, w_mv, w_odds
 
@@ -431,7 +439,8 @@ async def implied_points_partial(conn, competition_id, season_id, bars, team_ids
 
 async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
                                 team_ids_by_name, mv_index, matches_played,
-                                games_in_season, goals_per_game, now=None):
+                                games_in_season, goals_per_game,
+                                mv_weight_pre=None, now=None):
     """Blend form, squad value and outright odds into one rating.
 
     `ratings` carries Attack/Defense in RAW goal units (what _prepare_league
@@ -527,7 +536,8 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
                     z = MV_SOFT_CAP * math.tanh(z / MV_SOFT_CAP)
                     mv_overall[t] = z * spread
 
-    w_form, w_mv, w_odds = blend_weights(matches_played, games_in_season)
+    w_form, w_mv, w_odds = blend_weights(matches_played, games_in_season,
+                                         mv_pre=mv_weight_pre)
 
     if odds_is_partial and odds_overall:
         # Anchor the thin-book component on where form and squad value

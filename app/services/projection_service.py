@@ -274,7 +274,7 @@ class ProjectionService:
             ctx.league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
             ctx.country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
             ctx.div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
-            ctx.mv_beta = float(r.get('mv_beta', 0.15))
+            ctx.mv_beta = float(r.get('mv_beta', unified_ratings.W_MV_PRE))
             ctx.odds_beta = float(r.get('odds_beta', 0.3))
             ctx.fpl = (league == 'Premier League')  # FPL is always PL-only
             logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
@@ -311,7 +311,11 @@ class ProjectionService:
                 ctx.league_above_defense_weight = 1.0
                 ctx.country_code = None
                 ctx.div = None
-                ctx.mv_beta = 0.0
+                # mv_beta = squad value's pre-season weight, so the
+                # no-config fallback is the standard weight, not zero —
+                # 0.0 under the old meaning was "apply no nudge", but here
+                # it would mean "ignore squad value entirely".
+                ctx.mv_beta = unified_ratings.W_MV_PRE
                 ctx.odds_beta = 1.0
                 logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
 
@@ -665,10 +669,9 @@ class ProjectionService:
 
         # In[ ]:
 
-        # Team Strength inputs (George, 2026-07-30): snapshot the ratings
-        # BEFORE the market-value adjustment. team_strength blends squad value
-        # in as its own weighted component, so its base component must be the
-        # pre-MV rating or squad value is counted twice.
+        # Snapshot the ratings BEFORE the market-value adjustment: the
+        # unified blend takes squad value in as its own weighted component,
+        # so its base must be the pre-MV rating or money is counted twice.
         ProjectionService._strength_inputs = {
             'pre_mv': ratings[['Team', 'Attack', 'Defense']].copy(),
             'mv_index': {},
@@ -740,82 +743,65 @@ class ProjectionService:
                 ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
                 ratings['MV Index Reverse'] = ratings['MV Index Reverse'].fillna(1.0)
 
-            # Hand the finished MV Index to team_strength as its squad-value
-            # component (the same index, not a second derivation).
+            # Hand the finished MV Index to the unified blend as its
+            # squad-value component (the same index, not a second derivation).
             ProjectionService._strength_inputs['mv_index'] = dict(
                 zip(ratings['Team'], pd.to_numeric(ratings['MV Index'], errors='coerce'))
             )
 
-            if not unified_ratings.UNIFIED_ENABLED:
-                # LEGACY mv_beta nudge. Superseded by the unified blend below,
-                # kept so that turning the blend off restores the previous
-                # behaviour exactly rather than dropping squad value entirely.
-                total_match_perc = 38 / total_matches
-                mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
-                ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
-                    'Attack'].mean()) * mv_beta
-                ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-                ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
-                    'Defense'].mean()) * mv_beta
-                ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-                ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-                ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-                ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance',
-                                      'MV Defense Underperformance %', 'MV Attack Underperformance %'],
-                             inplace=True)
             ratings.drop(columns=['MV Index', 'MV Index Reverse'], inplace=True)
-            logger.info(f"[{league}] Step: market value applied "
-                        f"({'unified blend' if unified_ratings.UNIFIED_ENABLED else 'legacy mv_beta'})")
+            logger.info(f"[{league}] Step: market value index built")
         except Exception as _mv_err:
             logger.warning(f"[{league}] Market value block failed for {league}: {_mv_err} — skipping MV adjustment")
 
         # --- UNIFIED RATING -------------------------------------------------
-        # Replaces the mv_beta nudge that used to sit here. That nudge tilted
-        # only the ratings driving FIXTURE predictions, while a separate
-        # team_strength blend drove the SEASON SIMULATION — so the model could
-        # project Liverpool 3rd and Brentford 10th, then make Brentford
-        # favourites when they met (George, 2026-07-31). One rating now feeds
-        # both. mv_beta and odds_beta are no longer read here; mv_beta's
-        # column stays in competition_projection_config until the old
-        # team_strength path is removed.
-        if unified_ratings.UNIFIED_ENABLED:
-            try:
-                _uni_ids = {}
-                for _name in ratings['Team']:
-                    try:
-                        _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
-                    except Exception:
-                        continue
-                _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-                            + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
-                _uni_conn = await get_source_connection()
+        # One rating for fixtures AND the season simulation. Replaced the
+        # mv_beta nudge that used to sit here, which tilted only the ratings
+        # driving FIXTURE predictions while a separate team_strength blend
+        # drove the SEASON SIMULATION — so the model could project Liverpool
+        # 3rd and Brentford 10th, then make Brentford favourites when they
+        # met (George, 2026-07-31).
+        #
+        # mv_beta is still read, but it now means squad value's PRE-SEASON
+        # WEIGHT rather than the old nudge coefficient — money predicts the
+        # table far better in some leagues than others, so it is set per
+        # competition. odds_beta is untouched and still drives the
+        # fixture-level goals blend, which is a different thing entirely.
+        try:
+            _uni_ids = {}
+            for _name in ratings['Team']:
                 try:
-                    ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
-                        _uni_conn,
-                        ratings,
-                        competition_id=league_id,
-                        season_id=current_season_id,
-                        team_ids_by_name=_uni_ids,
-                        mv_index=(ProjectionService._strength_inputs or {}).get('mv_index') or {},
-                        matches_played=matches_played,
-                        # NB: `max`/`min` are shadowed by numpy floats in the
-                        # market-value block above, so the builtins are not
-                        # callable here. Written without them on purpose.
-                        games_in_season=((len(ratings) - 1) * 2) or 1,
-                        goals_per_game=_uni_gpg,
-                    )
-                finally:
-                    release_source_connection(_uni_conn)
-                logger.info(f"[{league}] Step: unified rating applied")
-            except Exception as _uni_err:
-                # Never fail a projection run over the blend — fall through on
-                # the form ratings, which is the pre-blend behaviour.
-                logger.warning(
-                    f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+                    _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
+                except Exception:
+                    continue
+            _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
+                        + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
+            _uni_conn = await get_source_connection()
+            try:
+                ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
+                    _uni_conn,
+                    ratings,
+                    competition_id=league_id,
+                    season_id=current_season_id,
+                    team_ids_by_name=_uni_ids,
+                    mv_index=(ProjectionService._strength_inputs or {}).get('mv_index') or {},
+                    matches_played=matches_played,
+                    # NB: `max`/`min` are shadowed by numpy floats in the
+                    # market-value block above, so the builtins are not
+                    # callable here. Written without them on purpose.
+                    games_in_season=((len(ratings) - 1) * 2) or 1,
+                    goals_per_game=_uni_gpg,
+                    mv_weight_pre=mv_beta,
                 )
-
-        # Manual operator overrides from the Projections Admin Console
-        # (projections_team_dials). Applied AFTER MV adjustment and BEFORE
+            finally:
+                release_source_connection(_uni_conn)
+            logger.info(f"[{league}] Step: unified rating applied")
+        except Exception as _uni_err:
+            # Never fail a projection run over the blend — fall through on
+            # the form ratings, which is the pre-blend behaviour.
+            logger.warning(
+                f"[{league}] Unified rating failed ({_uni_err}) — continuing on form ratings only"
+            )
         # the rescale-to-mean=100, so dialled teams shift the league mean
         # and other teams' indexed values drift naturally — exactly what
         # an operator expects when they say "boost Arsenal by 20%".
@@ -892,104 +878,6 @@ class ProjectionService:
 
 
         return ratings
-
-    async def _resolve_sim_ratings(self, league, league_id, ratings, teams, comp_teams,
-                                   fixtures_df, current_season_id, previous_season_id,
-                                   matches_played):
-        """Ratings for the SEASON SIMULATION.
-
-        RETIRED as a decision point (2026-08-03). `ratings` now arrives from
-        _prepare_league already carrying the unified blend of form, squad
-        value and outright odds, and the season simulation uses exactly that
-        — the same numbers the fixture projections use.
-
-        The old behaviour returned a SEPARATE Team Strength rating here, so a
-        team could be projected 3rd over the season yet be the underdog when
-        those two sides actually met. That contradiction is what the unified
-        rating exists to remove, so there is no longer a choice to make.
-
-        The team_strength computation below is kept only to keep writing the
-        `team_strength_ratings` audit table while the old path is compared
-        against the new one; its output is no longer returned. Delete this
-        whole method once that comparison is done.
-
-        Never raises: any failure falls back to the passed-in ratings.
-        """
-        from app.services import team_strength as ts
-
-        if unified_ratings.UNIFIED_ENABLED:
-            return ratings
-
-        if not ts.STRENGTH_ENABLED:
-            return ratings
-
-        try:
-            inputs = ProjectionService._strength_inputs or {}
-            comp_team_names = [t for t in ratings['Team'].tolist()]
-            team_ids_by_name = {}
-            for name in comp_team_names:
-                try:
-                    team_ids_by_name[name] = int(get_team_id(name, teams, league_id, comp_teams))
-                except Exception:
-                    continue
-
-            _conn = await get_source_connection()
-            try:
-                odds_df = await ts.load_outright_odds(_conn, league_id, current_season_id)
-            finally:
-                release_source_connection(_conn)
-
-            promoted = ts.promoted_team_names(
-                fixtures_df, teams, league_id, previous_season_id, comp_team_names,
-                team_ids_by_name=team_ids_by_name,
-            )
-            if promoted:
-                logger.info(f"[{league}] strength: promoted/new to tier — {sorted(promoted)}")
-
-            strength = ts.build_strength_ratings(
-                ratings=ratings[['Team', 'Attack', 'Defense']],
-                odds_df=odds_df,
-                mv_index=inputs.get('mv_index') or {},
-                team_ids_by_name=team_ids_by_name,
-                promoted_teams=promoted,
-                matches_played=matches_played,
-                size=len(comp_team_names),
-                base_ratings=inputs.get('pre_mv'),
-            )
-        except Exception as err:
-            logger.warning(f"[{league}] Team strength failed — season simulation falls back to "
-                           f"base ratings: {err}", exc_info=True)
-            return ratings
-
-        if strength is None or strength.empty:
-            logger.warning(f"[{league}] Team strength produced no rows — using base ratings")
-            return ratings
-
-        try:
-            from app.repository.team_strength_repo import insert_team_strength_async
-            await insert_team_strength_async(strength, league_id, current_season_id)
-        except Exception as err:
-            logger.warning(f"[{league}] team_strength_ratings write failed (non-fatal): {err}")
-
-        if not self._use_strength_ratings(league):
-            logger.info(f"[{league}] Team strength computed + stored, NOT enabled — "
-                        f"season simulation uses base ratings")
-            return ratings
-
-        logger.info(f"[{league}] Season simulation using TEAM STRENGTH ratings")
-        return strength[['Team', 'Attack', 'Defense']]
-
-    @staticmethod
-    def _use_strength_ratings(league: str) -> bool:
-        """Per-competition opt-in from competition_projection_config."""
-        try:
-            cfg = ProjectionService._current_source.projection_config
-            if cfg is None or cfg.empty or 'use_strength_ratings' not in cfg.columns:
-                return False
-            row = cfg[cfg['league_name'] == league]
-            return bool(int(row.iloc[0]['use_strength_ratings'])) if len(row) else False
-        except Exception:
-            return False
 
     async def projections(self, league_request):
         league = league_request.league or 'Championship'
@@ -1359,14 +1247,11 @@ class ProjectionService:
             season_fixtures.reset_index(drop=True, inplace=True)
             season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
-            # Season simulation runs on market-anchored TEAM STRENGTH, not the
-            # form-tilted `ratings` — see _resolve_sim_ratings.
-            _sim_ratings = await self._resolve_sim_ratings(
-                league=league, league_id=league_id, ratings=ratings, teams=teams,
-                comp_teams=comp_teams, fixtures_df=fixtures_df,
-                current_season_id=current_season_id, previous_season_id=previous_season_id,
-                matches_played=matches_played,
-            )
+            # The season simulation uses the SAME rating as the fixture
+            # projections. There used to be a swap here to a separate
+            # team_strength rating, which is how the model could project a
+            # team 3rd over the season yet make them underdogs in the match.
+            _sim_ratings = ratings
 
             season_score_preds = make_round_goal_prediction(season_fixtures, _sim_ratings, avg_home_goals, avg_away_goals)
 
@@ -2079,7 +1964,23 @@ class ProjectionService:
                 # auto-projected from the team_projections columns we added
                 # above. Sum per FPL position, apply Poisson SF for hit%.
                 # PL-only by construction (we're inside `if fpl:`).
-                from scipy.stats import poisson as _td_poisson
+                from scipy.stats import poisson as _td_poisson, nbinom as _td_nbinom
+                # CBIT counts are mildly OVERDISPERSED relative to Poisson:
+                # measured variance/mean across 312 players with 10+ starts in
+                # 25/26 is median 1.27, mean 1.34 (passes, by contrast, are
+                # 4.15). Poisson therefore has too thin a tail and understates
+                # hit rates near the threshold — the calibration check showed
+                # predicted 24.6% against 30.2% actual in that bucket.
+                # Negative binomial with the same mean and var = 1.27 x mean.
+                # George, 2026-08-04.
+                # Poisson retained (George, 2026-08-04). NegBinom at 1.27 IS
+                # measurably better — mean predicted 19.4% vs actual 19.9% and
+                # MAE 0.0392 against Poisson's 18.3% / 0.0409 across 312
+                # players — but it fattens BOTH tails, so it pulls the top
+                # DefCon players DOWN ~2.5pp (Hill 68.1 -> 65.4) while lifting
+                # the low band. Set to 1.0 to keep Poisson; raise to 1.27 to
+                # switch.
+                _TD_DISPERSION = 1.0
                 def _td_safe(v):
                     if v is None or pd.isna(v):
                         return 0.0
@@ -2107,7 +2008,12 @@ class ProjectionService:
                         threshold = 12
                     if total <= 0:
                         return 0.0
-                    return float(_td_poisson.sf(threshold - 1, total))
+                    if _TD_DISPERSION <= 1.0001:
+                        return float(_td_poisson.sf(threshold - 1, total))
+                    # var = mean x d  ->  r = mean/(d-1), p = r/(r+mean)
+                    _r = total / (_TD_DISPERSION - 1.0)
+                    _p = _r / (_r + total)
+                    return float(_td_nbinom.sf(threshold - 1, _r, _p))
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
                 # Phase 2 persistence: store the percentage form of CBIT
                 # Hit Rate so the fantasy API can surface it as
@@ -3307,14 +3213,11 @@ class ProjectionService:
             season_fixtures.reset_index(drop=True, inplace=True)
             season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
-            # Same strength swap as the nightly `projections` path — both write
-            # league_projections, so they must agree or the last run wins.
-            _sim_ratings = await self._resolve_sim_ratings(
-                league=league, league_id=league_id, ratings=ratings, teams=teams,
-                comp_teams=comp_teams, fixtures_df=fixtures_df,
-                current_season_id=current_season_id, previous_season_id=previous_season_id,
-                matches_played=matches_played,
-            )
+            # The season simulation uses the SAME rating as the fixture
+            # projections. There used to be a swap here to a separate
+            # team_strength rating, which is how the model could project a
+            # team 3rd over the season yet make them underdogs in the match.
+            _sim_ratings = ratings
 
             season_score_preds = make_round_goal_prediction(season_fixtures, _sim_ratings, avg_home_goals, avg_away_goals)
 
