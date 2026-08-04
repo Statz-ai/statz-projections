@@ -2327,6 +2327,26 @@ class ProjectionService:
                         _fpl_frame[_TD_DC_RATE_COL] = _fpl_frame.apply(_td_dc_rate90, axis=1)
                         _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
                         _fpl_frame['def_con_pct'] = (_fpl_frame['CBIT Hit Rate'] * 100).round(2)
+                        # Persist the model's DC share so the dials panel has a
+                        # slider baseline for EVERY position. Computed here
+                        # because it needs the assembled rate and the team
+                        # totals together — the panel can't derive it (MID/FWD
+                        # are scored on CBIT + recoveries, so the stored CBIT
+                        # share alone understates them).
+                        try:
+                            from app.services.xminutes import build_dc_share_rows
+                            from app.repository.fpl_per90_repo import (
+                                insert_per90_shares_async as _dc_insert,
+                            )
+                            _dc_rows = build_dc_share_rows(
+                                _fpl_frame, team_projections, _per90_collector)
+                            if _dc_rows:
+                                await _dc_insert(_dc_rows, league_id)
+                                logger.info(f"[{league}] FPL: DC share baseline "
+                                            f"written for {len(_dc_rows)} players")
+                        except Exception as _dcs_err:
+                            logger.warning(f"[{league}] DC share baseline write failed "
+                                           f"(non-fatal): {_dcs_err}")
                         logger.info(f"[{league}] FPL xMinutes: profiles for {len(_xm_profiles)} "
                                     f"players ({time.time()-_t_xm:.1f}s)")
                     except Exception as _xm_err:

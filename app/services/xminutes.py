@@ -558,6 +558,75 @@ _DC_TEAM_CBIT = "Clearances Blocks Interceptions Tackles (FPL)"
 _DC_TEAM_RECOVERIES = "Ball Recovery"
 
 
+DC_SHARE_STAT_NAME = "Defensive Contribution"
+
+
+def build_dc_share_rows(frame, team_predictions, per90_collector):
+    """Model DC share per player, for the dials panel's slider baseline.
+
+    The panel needs the share the dial REPLACES. Deriving it there is not
+    possible: DEF are scored on CBIT alone but MID/FWD on CBIT + recoveries, so
+    a MID's share is a team-weighted blend of two stored shares and the stored
+    CBIT share alone understates him. The panel previously gated the baseline on
+    position and showed nothing for MID/FWD; this stores the real number for
+    every position instead.
+
+    share90 because DC_RATE_COL is already a per-90 rate; share_legacy is the
+    m_bar-scaled companion the panel's other sliders use.
+    """
+    if DC_RATE_COL not in frame.columns or "FPL Position" not in frame.columns:
+        return []
+    want = [c for c in (_DC_TEAM_CBIT, _DC_TEAM_RECOVERIES) if c in team_predictions.columns]
+    if _DC_TEAM_CBIT not in want:
+        return []
+    tp = team_predictions[["fixture_id", "Team"] + want].rename(
+        columns={c: f"_dcs_{c}" for c in want}
+    ).drop_duplicates(subset=["fixture_id", "Team"])
+    m = frame.merge(tp, on=["fixture_id", "Team"], how="left")
+
+    cbit = pd.to_numeric(m[f"_dcs_{_DC_TEAM_CBIT}"], errors="coerce")
+    rec = (pd.to_numeric(m[f"_dcs_{_DC_TEAM_RECOVERIES}"], errors="coerce")
+           if _DC_TEAM_RECOVERIES in want else pd.Series(0.0, index=m.index))
+    total = cbit.where(m["FPL Position"].eq("DEF"), cbit + rec.fillna(0.0))
+    rate = pd.to_numeric(m[DC_RATE_COL], errors="coerce")
+    share = (rate / total).where(total > 0)
+    m = m.assign(_dc_share=share)
+
+    # m_bar from the player's CBIT sample — same minutes context the rate was
+    # built on. Without it the row is dropped by the repo, so fall back to a
+    # full start rather than lose the baseline.
+    m_bars = {
+        r["player_id"]: r["m_bar"]
+        for r in (per90_collector or [])
+        if r.get("stat_name") == _DC_TEAM_CBIT and r.get("m_bar")
+    }
+    n_games = {
+        r["player_id"]: r.get("n_games", 0)
+        for r in (per90_collector or [])
+        if r.get("stat_name") == _DC_TEAM_CBIT
+    }
+
+    rows = []
+    for pid, grp in m.dropna(subset=["_dc_share"]).groupby("player_id"):
+        if pd.isna(pid):
+            continue
+        pid = int(pid)
+        s90 = float(grp["_dc_share"].mean())
+        if s90 <= 0:
+            continue
+        mb = float(m_bars.get(pid) or XMIN_DEFAULT_START_MINUTES)
+        rows.append({
+            "player_id": pid,
+            "stat_name": DC_SHARE_STAT_NAME,
+            "share_legacy": s90 * mb / 90.0,
+            "share90": s90,
+            "m_bar": mb,
+            "n_games": int(n_games.get(pid) or 0),
+            "series": [],
+        })
+    return rows
+
+
 def _apply_defcon_share(frame, dials_df, team_predictions):
     """defcon_share: the player's share of his team's defensive-contribution
     total, converted to a per-90 rate for the banded threshold maths.
