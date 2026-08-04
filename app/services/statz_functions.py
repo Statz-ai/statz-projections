@@ -1262,40 +1262,69 @@ def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_type
     return team_stats_df['Weighted' + stat].sum() / team_stats_df['Weight'].sum()
 
 
+def _venue_sample(get_stats_fn, stat, team, fixtures, team_stats_df, teams, stats_types, comp_id,
+                  games, season_id, comp_teams, as_of):
+    """Venue sample for a team, retried across competitions when the
+    in-competition history is too thin to measure a split.
+
+    A newly-promoted club has NO fixtures in the league being projected, so
+    the comp-scoped lookup returns zero rows and every caller fell through to
+    a hardcoded constant. Home/away split is a property of the CLUB (pitch,
+    travel, crowd, style), not of the division, so a Championship split
+    transfers to the Premier League far better than a guess does.
+
+    In-competition is still tried first, so nothing changes for a club that
+    has its own league history. Only the previously-broken case widens.
+    """
+    sample = get_stats_fn(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
+                          games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
+    if len(sample) < 5 and comp_id is not None:
+        sample = get_stats_fn(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=None,
+                              games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
+    return sample
+
+
 def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None,
                                 games=None, season_id=None, comp_teams=None, as_of=None):
-    team_stats = get_team_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                                games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
+    import pandas as pd
+    team_stats = _venue_sample(get_team_stats, stat, team, fixtures, team_stats_df, teams, stats_types,
+                               comp_id, games, season_id, comp_teams, as_of)
     if len(team_stats) < 5:
-        if venue == 'H':
-            return 1.1
-        else:
-            return 0.9
+        # Neutral, NOT 1.1/0.9. That constant asserted home > away for every
+        # stat, which is true for attacking output and FALSE for defensive
+        # work — away sides make ~9% MORE CBIT. Promoted clubs hit this path
+        # for every stat and came out with the venue split inverted: measured
+        # home/away CBIT of 1.15-1.17 against a real ~0.86 for established
+        # clubs, worth ~13 CBIT a game. Applying no adjustment beats applying
+        # a confidently wrong one. George, 2026-08-04.
+        return 1.0
     home = team_stats[team_stats['venue'] == 'H'][f'Team {stat}'].mean()
     away = team_stats[team_stats['venue'] == 'A'][f'Team {stat}'].mean()
     avg = team_stats[f'Team {stat}'].mean()
-    if venue == 'H':
-        return home / avg
-    else:
-        return away / avg
+    # A one-sided sample leaves home or away as NaN, which would silently
+    # poison the projection downstream.
+    if pd.isna(avg) or avg == 0:
+        return 1.0
+    effect = home / avg if venue == 'H' else away / avg
+    return 1.0 if pd.isna(effect) else effect
 
 
 def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None, games=None,
                                season_id=None, comp_teams=None, as_of=None):
-    team_stats = get_opp_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                               games=games, season_id=season_id, comp_teams=comp_teams, as_of=as_of)
+    import pandas as pd
+    team_stats = _venue_sample(get_opp_stats, stat, team, fixtures, team_stats_df, teams, stats_types,
+                               comp_id, games, season_id, comp_teams, as_of)
     if len(team_stats) < 5:
-        if venue == 'H':
-            return 0.9
-        else:
-            return 1.1
+        # Neutral rather than the old 0.9/1.1 — same reasoning as
+        # calculate_team_venue_effect, mirrored for the conceding side.
+        return 1.0
     home = team_stats[team_stats['venue'] == 'H'][f'Team {stat}'].mean()
     away = team_stats[team_stats['venue'] == 'A'][f'Team {stat}'].mean()
     avg = team_stats[f'Team {stat}'].mean()
-    if venue == 'H':
-        return home / avg
-    else:
-        return away / avg
+    if pd.isna(avg) or avg == 0:
+        return 1.0
+    effect = home / avg if venue == 'H' else away / avg
+    return 1.0 if pd.isna(effect) else effect
 
 
 def get_team_stat_histories(team, opponent, fixtures, stat, team_stats, teams, stats_types, ratings=None,
