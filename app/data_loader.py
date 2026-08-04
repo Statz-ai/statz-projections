@@ -710,8 +710,10 @@ class LeagueDataLoader:
         tackles_id = _resolve("Tackles")
         recoveries_id = _resolve("Ball Recovery")
         cbi_id = _resolve("Clearances Blocks Interceptions (FPL)")
+        cbit_id = _resolve("Clearances Blocks Interceptions Tackles (FPL)")
 
-        if xg_id is None and xa_id is None and tackles_id is None and recoveries_id is None and cbi_id is None:
+        if (xg_id is None and xa_id is None and tackles_id is None
+                and recoveries_id is None and cbi_id is None and cbit_id is None):
             logger.warning("[FPL overlay] No FPL-overlayable stats_types resolved — skipping overlay entirely")
             return
 
@@ -745,6 +747,17 @@ class LeagueDataLoader:
         for col in ("expected_goals", "expected_assists", "tackles", "recoveries",
                     "clearances_blocks_interceptions"):
             fpl[col] = pd.to_numeric(fpl[col], errors="coerce")
+        # Combined CBIT, the quantity FPL actually scores the defensive
+        # contribution threshold against (DEF need 10; MID/FWD need 12 of
+        # CBIT + recoveries). Injected as ONE stat so the standard share path
+        # handles it — recency weighting, damping, cross-club and per-90 all
+        # come free, and there is a single definition instead of the three the
+        # pipeline used to carry. George, 2026-08-04.
+        fpl["cbit"] = (
+            fpl["clearances_blocks_interceptions"].fillna(0) + fpl["tackles"].fillna(0)
+        ).where(
+            fpl["clearances_blocks_interceptions"].notna() | fpl["tackles"].notna()
+        )
 
         # Map player→team. Required to stamp injected rows with the correct
         # team_id and to aggregate per-team for team_stats overlay. Drop
@@ -770,6 +783,7 @@ class LeagueDataLoader:
             (tackles_id, "tackles", "Tackles"),
             (recoveries_id, "recoveries", "Recoveries"),
             (cbi_id, "clearances_blocks_interceptions", "CBI"),
+            (cbit_id, "cbit", "CBIT"),
         ]
 
         results = []

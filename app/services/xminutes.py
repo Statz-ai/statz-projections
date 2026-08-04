@@ -108,6 +108,10 @@ XMIN_SCALED_STAT_COLS = [
     "Shots Total", "Shots On Target", "Total Crosses",
     "Interceptions", "Tackles", "Offsides", "Fouls", "Fouls Drawn",
     "Ball Recovery", "Clearances Blocks Interceptions (FPL)",
+    # Combined CBIT (999003) — must scale with minutes like its components, or
+    # the DefCon hit rate would be computed on full-start actions for a player
+    # projected to play 30.
+    "Clearances Blocks Interceptions Tackles (FPL)",
     "Clearances Average", "Blocked Shots Average", "Ball Recovery Average",
     "Tackles Won Average", "CBIT Average",
 ]

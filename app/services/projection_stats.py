@@ -91,6 +91,13 @@ TEAM_STAT_NAMES = (
     # value as a fresh team_stats row.
     "Ball Recovery",
     "Clearances Blocks Interceptions (FPL)",
+    # Combined CBIT (id 999003, FPL-synthetic): clearances + blocks +
+    # interceptions + tackles, the quantity FPL scores the defensive
+    # contribution threshold against. Injected by _overlay_fpl_stats for PL.
+    # Replaces mixing a modelled Tackles projection with a blended CBI lump —
+    # FPL and Sportmonks agree on the total to 0.3%, so one definition is
+    # strictly simpler with no loss. George, 2026-08-04.
+    "Clearances Blocks Interceptions Tackles (FPL)",
 )
 
 # Stats queried from fixture_player_stats.
@@ -147,6 +154,13 @@ PLAYER_STAT_NAMES = (
     # rows for PL fixtures. Required so the team-down CBIT projection
     # can compute the player's CBI share of the team CBI total.
     "Clearances Blocks Interceptions (FPL)",
+    # Combined CBIT (id 999003, FPL-synthetic): clearances + blocks +
+    # interceptions + tackles, the quantity FPL scores the defensive
+    # contribution threshold against. Injected by _overlay_fpl_stats for PL.
+    # Replaces mixing a modelled Tackles projection with a blended CBI lump —
+    # FPL and Sportmonks agree on the total to 0.3%, so one definition is
+    # strictly simpler with no loss. George, 2026-08-04.
+    "Clearances Blocks Interceptions Tackles (FPL)",
     # BPS static-rate stats (fpl_static_rates.py). Player traits rated per-90
     # from history rather than projected team-down, so they need PLAYER rows
     # only — deliberately absent from TEAM_STAT_NAMES.

@@ -1577,6 +1577,7 @@ class ProjectionService:
             _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
             _rec_col = []
             _cbi_col = []
+            _cbit_col = []
             for i in range(len(team_projections)):
                 _row = team_projections.iloc[i]
                 try:
@@ -1600,10 +1601,29 @@ class ProjectionService:
                     )
                 except Exception:
                     cbi_v = 0
+                # Combined CBIT — the quantity FPL scores the threshold
+                # against. Projected as ONE stat rather than assembling a
+                # modelled Tackles with a blended CBI lump: FPL and Sportmonks
+                # agree on the total to 0.3%, so one definition costs nothing
+                # and removes the three inconsistent notions the pipeline
+                # carried. George, 2026-08-04.
+                try:
+                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                        _row['Team'], _row['Opponent'], fixtures_df,
+                        'Clearances Blocks Interceptions Tackles (FPL)',
+                        team_stats, teams, stats_types,
+                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
+                        league_weightings=_lw_def, season_id=_sid_def, games=50,
+                        comp_teams=_cpl_def,
+                    )
+                except Exception:
+                    cbit_v = 0
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
+                _cbit_col.append(cbit_v)
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
+            team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
 
         saves = []
         for i in range(len(team_projections)):
@@ -1631,7 +1651,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -2068,14 +2088,22 @@ class ProjectionService:
                     pos = row.get('FPL Position')
                     if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
                         return 0.0
-                    tackles = _td_safe(row.get('Tackles'))
-                    cbi = _td_safe(row.get('Clearances Blocks Interceptions (FPL)'))
+                    # ONE combined CBIT quantity (999003) rather than adding a
+                    # modelled Tackles to a blended CBI lump — the pipeline used
+                    # to carry three inconsistent notions of the same thing.
+                    # Falls back to the old assembly when the combined column is
+                    # absent (non-PL, or a frame built before the overlay).
+                    cbit = row.get('Clearances Blocks Interceptions Tackles (FPL)')
+                    if cbit is None or (isinstance(cbit, float) and pd.isna(cbit)):
+                        cbit = _td_safe(row.get('Tackles')) + _td_safe(
+                            row.get('Clearances Blocks Interceptions (FPL)'))
+                    else:
+                        cbit = _td_safe(cbit)
                     if pos == 'DEF':
-                        total = tackles + cbi
+                        total = cbit
                         threshold = 10
                     else:
-                        recoveries = _td_safe(row.get('Ball Recovery'))
-                        total = tackles + recoveries + cbi
+                        total = cbit + _td_safe(row.get('Ball Recovery'))
                         threshold = 12
                     if total <= 0:
                         return 0.0
@@ -3799,6 +3827,7 @@ class ProjectionService:
             _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
             _rec_col = []
             _cbi_col = []
+            _cbit_col = []
             for i in range(len(team_projections)):
                 _row = team_projections.iloc[i]
                 try:
@@ -3822,10 +3851,29 @@ class ProjectionService:
                     )
                 except Exception:
                     cbi_v = 0
+                # Combined CBIT — the quantity FPL scores the threshold
+                # against. Projected as ONE stat rather than assembling a
+                # modelled Tackles with a blended CBI lump: FPL and Sportmonks
+                # agree on the total to 0.3%, so one definition costs nothing
+                # and removes the three inconsistent notions the pipeline
+                # carried. George, 2026-08-04.
+                try:
+                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                        _row['Team'], _row['Opponent'], fixtures_df,
+                        'Clearances Blocks Interceptions Tackles (FPL)',
+                        team_stats, teams, stats_types,
+                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
+                        league_weightings=_lw_def, season_id=_sid_def, games=50,
+                        comp_teams=_cpl_def,
+                    )
+                except Exception:
+                    cbit_v = 0
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
+                _cbit_col.append(cbit_v)
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
+            team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
 
         saves = []
         for i in range(len(team_projections)):
@@ -3847,7 +3895,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4453,6 +4501,7 @@ class ProjectionService:
             _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
             _rec_col = []
             _cbi_col = []
+            _cbit_col = []
             for i in range(len(team_projections)):
                 _row = team_projections.iloc[i]
                 try:
@@ -4476,10 +4525,29 @@ class ProjectionService:
                     )
                 except Exception:
                     cbi_v = 0
+                # Combined CBIT — the quantity FPL scores the threshold
+                # against. Projected as ONE stat rather than assembling a
+                # modelled Tackles with a blended CBI lump: FPL and Sportmonks
+                # agree on the total to 0.3%, so one definition costs nothing
+                # and removes the three inconsistent notions the pipeline
+                # carried. George, 2026-08-04.
+                try:
+                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                        _row['Team'], _row['Opponent'], fixtures_df,
+                        'Clearances Blocks Interceptions Tackles (FPL)',
+                        team_stats, teams, stats_types,
+                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
+                        league_weightings=_lw_def, season_id=_sid_def, games=50,
+                        comp_teams=_cpl_def,
+                    )
+                except Exception:
+                    cbit_v = 0
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
+                _cbit_col.append(cbit_v)
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
+            team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
 
         saves = []
         for i in range(len(team_projections)):
@@ -4507,7 +4575,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -5270,6 +5338,7 @@ class ProjectionService:
             _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
             _rec_col = []
             _cbi_col = []
+            _cbit_col = []
             for i in range(len(team_projections)):
                 _row = team_projections.iloc[i]
                 try:
@@ -5293,10 +5362,29 @@ class ProjectionService:
                     )
                 except Exception:
                     cbi_v = 0
+                # Combined CBIT — the quantity FPL scores the threshold
+                # against. Projected as ONE stat rather than assembling a
+                # modelled Tackles with a blended CBI lump: FPL and Sportmonks
+                # agree on the total to 0.3%, so one definition costs nothing
+                # and removes the three inconsistent notions the pipeline
+                # carried. George, 2026-08-04.
+                try:
+                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                        _row['Team'], _row['Opponent'], fixtures_df,
+                        'Clearances Blocks Interceptions Tackles (FPL)',
+                        team_stats, teams, stats_types,
+                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
+                        league_weightings=_lw_def, season_id=_sid_def, games=50,
+                        comp_teams=_cpl_def,
+                    )
+                except Exception:
+                    cbit_v = 0
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
+                _cbit_col.append(cbit_v)
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
+            team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
 
         saves = []
         for i in range(len(team_projections)):
@@ -5324,7 +5412,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
