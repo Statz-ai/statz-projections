@@ -10,11 +10,18 @@ logger = logging.getLogger("transfermarkt_mv_repo")
 
 
 async def insert_market_value_snapshots_async(df: pd.DataFrame, league_dashed: str) -> int:
-    """Upsert today's Transfermarkt scrape into transfermarkt_market_value_snapshots.
+    """Bank today's Transfermarkt scrape into transfermarkt_market_value_snapshots.
 
-    Called after every successful scrape so the cache stays current. Unique
-    key is (league_dashed, team_name) — repeated scrapes for the same
-    league overwrite the last snapshot for each team.
+    Unique key is (league_dashed, team_name, snapshot_date), so each run
+    adds a row and the series accumulates; a retry or a second run on the
+    same day updates that day's row instead of minting a near-duplicate.
+
+    It used to key on (league_dashed, team_name), which meant every run
+    overwrote the last — the weekly scrape had been running since mid-July
+    and left exactly one snapshot behind. The history matters: calibrating
+    what squad value is worth needs a season's OPENING values against that
+    season's results, and with a single snapshot the only available test
+    was today's squads against last season's table.
     """
     if df is None or len(df) == 0:
         return 0
@@ -32,9 +39,9 @@ async def insert_market_value_snapshots_async(df: pd.DataFrame, league_dashed: s
 
     sql = """
     INSERT INTO transfermarkt_market_value_snapshots (
-        league_dashed, team_name, market_value, scraped_at,
+        league_dashed, team_name, market_value, scraped_at, snapshot_date,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, NOW(), NOW(), NOW())
+    ) VALUES (%s, %s, %s, NOW(), CURDATE(), NOW(), NOW())
     AS new
     ON DUPLICATE KEY UPDATE
         market_value = new.market_value,
