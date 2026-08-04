@@ -54,17 +54,27 @@ UNIFIED_ENABLED = True
 # --- weight schedule -------------------------------------------------------
 # p = fraction of the season played.
 #
-#   odds  0.40 -> 0.30   (never below 0.30: the book keeps repricing all
-#                         season, so it never becomes uninformative)
+#   odds  0.30 flat     (George, 2026-08-04. The book keeps repricing all
+#                         season so it never becomes uninformative, and with
+#                         the pre-season figure equal to the floor there is
+#                         nothing to fade — its share stays constant.)
 #   MV    0.30 -> 0.00   (gone by three-quarter distance — squad value is a
 #                         PRE-season prior, and once there is real evidence
 #                         it is just a proxy for what form now measures)
-#   form  the remainder, 0.30 -> 0.70
+#   form  the remainder, 0.40 -> 0.70
 #
 # George's rule: market value heaviest pre-season and fading, form lightest
-# pre-season and growing. One schedule for every league — no per-league
-# tuning, which is what mv_beta had turned into.
-W_ODDS_PRE = float(os.getenv("UNIFIED_W_ODDS_PRE", "0.40"))
+# pre-season and growing. One schedule for every league; only MV's starting
+# weight is per-competition (see blend_weights).
+#
+# Pre-season split settled at 40/30/30 after comparing it against 30/30/40
+# and 45/25/30 on a full Premier League simulation (2026-08-04). All three
+# gave near-identical tables — Arsenal 57/56/57% for the title, Hull 94/96/96%
+# for relegation — because form and the market already agree about most of
+# the league. The differences show only where they disagree: Liverpool 64.7
+# -> 62.9 -> 62.2 and Tottenham 56.1 -> 54.4 -> 53.5 as form gains weight.
+# Reweighting is NOT the lever for making projections diverge from the book.
+W_ODDS_PRE = float(os.getenv("UNIFIED_W_ODDS_PRE", "0.30"))
 W_ODDS_MIN = float(os.getenv("UNIFIED_W_ODDS_MIN", "0.30"))
 W_MV_PRE = float(os.getenv("UNIFIED_W_MV_PRE", "0.30"))
 MV_FADE_BY = float(os.getenv("UNIFIED_MV_FADE_BY", "0.75"))
