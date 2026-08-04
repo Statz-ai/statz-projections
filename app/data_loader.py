@@ -1120,14 +1120,32 @@ class LeagueDataLoader:
             n_player = len(new_rows)
 
         # ---- team-level roll-up for CBIT and Ball Recovery ----------------
+        # ONLY for competitions where we load the full player set. self.player_stats
+        # is scoped to self.player_ids, so for a foreign-league fixture we may hold
+        # ONE player's rows — summing those as a "team total" made his share ~100%
+        # instead of ~6%. Abdulkadir Omur came out at 99.89% DefCon that way
+        # (his own 7 CBIT read as the whole team's, against a real total of 92).
+        #
+        # team_fixture_ids is the league-scoped fixture set, which IS fully loaded;
+        # anything outside it gets no derived team row, so the share calc falls back
+        # to whatever team_stats already holds rather than to a fabricated total.
+        # George, 2026-08-04.
+        _full = set(int(x) for x in (self.team_fixture_ids or []))
+        # AND only for teams whose players we actually loaded. player_ids is
+        # resolved from team_ids, so within a league fixture we hold OUR side's
+        # squad but not the opponent's — rolling up the opponent side would
+        # understate their total the same way.
+        _our_teams = set(int(t) for t in (self.team_ids or []))
         n_team = 0
         for stat_id, label in ((cbit_id, "CBIT"), (rec_id, "Recoveries")):
             if stat_id is None:
                 continue
-            agg = (
-                ps[ps["stats_type_id"] == stat_id]
-                .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
-            )
+            _src = ps[ps["stats_type_id"] == stat_id]
+            if _full:
+                _src = _src[_src["fixture_id"].isin(_full)]
+            if _our_teams:
+                _src = _src[_src["team_id"].isin(_our_teams)]
+            agg = _src.groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
             if agg.empty:
                 continue
             ts = self.team_stats
