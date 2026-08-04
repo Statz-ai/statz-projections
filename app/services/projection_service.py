@@ -2000,31 +2000,15 @@ class ProjectionService:
                 # the low band. Set to 1.0 to keep Poisson; raise to 1.27 to
                 # switch.
                 _TD_DISPERSION = 1.0
+                # Imported, not re-spelled: these columns only exist because
+                # apply_per90_scaling stamps them, so the suffix must track it.
+                from app.services.xminutes import PER90_SUFFIX as _TD_P90_SUFFIX
                 def _td_safe(v):
                     if v is None or pd.isna(v):
                         return 0.0
                     return float(v)
-                def _td_cbit_hit_rate(row):
-                    pos = row.get('FPL Position')
-                    if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
-                        return 0.0
-                    # ONE combined CBIT quantity (999003) rather than adding a
-                    # modelled Tackles to a blended CBI lump — the pipeline used
-                    # to carry three inconsistent notions of the same thing.
-                    # Falls back to the old assembly when the combined column is
-                    # absent (non-PL, or a frame built before the overlay).
-                    cbit = row.get('Clearances Blocks Interceptions Tackles (FPL)')
-                    if cbit is None or (isinstance(cbit, float) and pd.isna(cbit)):
-                        cbit = _td_safe(row.get('Tackles')) + _td_safe(
-                            row.get('Clearances Blocks Interceptions (FPL)'))
-                    else:
-                        cbit = _td_safe(cbit)
-                    if pos == 'DEF':
-                        total = cbit
-                        threshold = 10
-                    else:
-                        total = cbit + _td_safe(row.get('Ball Recovery'))
-                        threshold = 12
+                def _td_tail(total, threshold):
+                    """P(X >= threshold) for a single minutes outcome."""
                     if total <= 0:
                         return 0.0
                     if _TD_DISPERSION <= 1.0001:
@@ -2033,6 +2017,76 @@ class ProjectionService:
                     _r = total / (_TD_DISPERSION - 1.0)
                     _p = _r / (_r + total)
                     return float(_td_nbinom.sf(threshold - 1, _r, _p))
+
+                def _td_cbit_total(row, pos, suffix=''):
+                    """CBIT (+ recoveries for MID/FWD) off the frame.
+
+                    suffix='' reads lambda at expected minutes; ' per90' reads
+                    the per-90 companion apply_per90_scaling stamps.
+
+                    ONE combined CBIT quantity (999003) rather than adding a
+                    modelled Tackles to a blended CBI lump — the pipeline used
+                    to carry three inconsistent notions of the same thing.
+                    Falls back to the old assembly when the combined column is
+                    absent (non-PL, or a frame built before the overlay).
+                    """
+                    cbit = row.get('Clearances Blocks Interceptions Tackles (FPL)' + suffix)
+                    if cbit is None or (isinstance(cbit, float) and pd.isna(cbit)):
+                        cbit = _td_safe(row.get('Tackles' + suffix)) + _td_safe(
+                            row.get('Clearances Blocks Interceptions (FPL)' + suffix))
+                    else:
+                        cbit = _td_safe(cbit)
+                    if pos != 'DEF':
+                        cbit += _td_safe(row.get('Ball Recovery' + suffix))
+                    return cbit
+
+                def _td_cbit_hit_rate(row):
+                    pos = row.get('FPL Position')
+                    if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
+                        return 0.0
+                    threshold = 10 if pos == 'DEF' else 12
+                    # Evaluate the threshold PER MINUTES BAND and weight by the
+                    # band probabilities, rather than collapsing minutes into a
+                    # single lambda first.
+                    #
+                    # Reaching 10 CBIT is a tail event, and the tail is convex
+                    # in lambda, so E[P(hit | minutes)] != P(hit | E[minutes]) —
+                    # averaging first invents a "53-minute Greaves" who never
+                    # takes the pitch. He either starts and has a real chance,
+                    # or he doesn't play and has none. Measured on the
+                    # non-dialled rows of the 2026-08-04 run, mean DefCon rose
+                    # 9.9% -> 17.7%, concentrated entirely on rotation risks:
+                    # Bentancur (p90 0.19) 1.2% -> 25.6%, while a nailed starter
+                    # like Thiaw (p90 0.91) moved 30.1% -> 34.7%. That split is
+                    # the check the maths is behaving — with one outcome to
+                    # average, both methods must agree.
+                    #
+                    # Same treatment fpl_bonus_sim already uses (it draws a band
+                    # then draws actions conditional on it); DefCon was the odd
+                    # one out. Bands are read post-dial and post-availability
+                    # flag, so a dialled player bands on the value George set.
+                    # George, 2026-08-04.
+                    rate90 = _td_cbit_total(row, pos, _TD_P90_SUFFIX)
+                    p_play = row.get('xmin_p_play')
+                    p60 = row.get('xmin_p60')
+                    p90 = row.get('xmin_p90')
+                    _have_bands = not any(
+                        v is None or (isinstance(v, float) and pd.isna(v))
+                        for v in (p_play, p60, p90)
+                    )
+                    if rate90 > 0 and _have_bands:
+                        p_play = float(p_play)
+                        p60 = min(float(p60), p_play)
+                        p90 = min(float(p90), p60)
+                        return (
+                            p90 * _td_tail(rate90, threshold)
+                            + max(0.0, p60 - p90) * _td_tail(rate90 * 75.0 / 90.0, threshold)
+                            + max(0.0, p_play - p60) * _td_tail(rate90 * 30.0 / 90.0, threshold)
+                        )
+                    # Provisional pre-xMinutes pass (no per-90 companions yet):
+                    # single-point lambda. Overwritten by the recompute after
+                    # scaling, which is the value that ships.
+                    return _td_tail(_td_cbit_total(row, pos), threshold)
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
                 # Phase 2 persistence: store the percentage form of CBIT
                 # Hit Rate so the fantasy API can surface it as
