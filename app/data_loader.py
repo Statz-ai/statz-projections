@@ -187,7 +187,7 @@ class LeagueDataLoader:
             # league (the FPL overlay above is PL-only), so a promoted player's
             # Championship history carries defensive data instead of collapsing to
             # a ~0 share. Must come AFTER the overlay: FPL keeps precedence on PL.
-            self._derive_cbit_from_components()
+            await self._derive_cbit_from_components(conn)
             self._load_local_files()
             self._loaded = True
             logger.info(
@@ -1052,7 +1052,7 @@ class LeagueDataLoader:
     # runtime rather than hardcoded, but listed here for reference.
     _CBIT_COMPONENTS = ("Clearances", "Blocked Shots", "Interceptions", "Tackles")
 
-    def _derive_cbit_from_components(self) -> None:
+    async def _derive_cbit_from_components(self, conn) -> None:
         """Build CBIT + roll up Ball Recovery to team level for EVERY league.
 
         Why this exists: the combined CBIT stat (999003) and team-level Ball
@@ -1084,6 +1084,7 @@ class LeagueDataLoader:
             return int(m["id"].iloc[0]) if not m.empty else None
 
         cbit_id = _sid("Clearances Blocks Interceptions Tackles (FPL)")
+        self._cbit_stat_id = cbit_id
         rec_id = _sid("Ball Recovery")
         comp_ids = [i for i in (_sid(n) for n in self._CBIT_COMPONENTS) if i is not None]
         if cbit_id is None or not comp_ids:
@@ -1119,56 +1120,92 @@ class LeagueDataLoader:
             ps = self.player_stats
             n_player = len(new_rows)
 
-        # ---- team-level roll-up for CBIT and Ball Recovery ----------------
-        # ONLY for competitions where we load the full player set. self.player_stats
-        # is scoped to self.player_ids, so for a foreign-league fixture we may hold
-        # ONE player's rows — summing those as a "team total" made his share ~100%
-        # instead of ~6%. Abdulkadir Omur came out at 99.89% DefCon that way
-        # (his own 7 CBIT read as the whole team's, against a real total of 92).
+        # ---- team-level totals, read from the DB ------------------------
+        # NOT summed from self.player_stats. That frame is scoped to
+        # self.player_ids, so for a cross-club fixture we hold ONE player's
+        # rows — summing those as a "team total" made Abdulkadir Omur's own 7
+        # CBIT stand in for his team's real 92 across 23 players, giving him a
+        # ~100% share and a 99.89% DefCon that shipped to the site.
         #
-        # team_fixture_ids is the league-scoped fixture set, which IS fully loaded;
-        # anything outside it gets no derived team row, so the share calc falls back
-        # to whatever team_stats already holds rather than to a fabricated total.
-        # George, 2026-08-04.
-        _full = set(int(x) for x in (self.team_fixture_ids or []))
-        # AND only for teams whose players we actually loaded. player_ids is
-        # resolved from team_ids, so within a league fixture we hold OUR side's
-        # squad but not the opponent's — rolling up the opponent side would
-        # understate their total the same way.
-        _our_teams = set(int(t) for t in (self.team_ids or []))
+        # The player-scope restriction is a VOLUME decision (the loader exists
+        # to stop pulling the whole DB per run) and cross-club history is
+        # deliberately loaded — see the module docstring. So the fix is not to
+        # load more players, it is to ask the DB for the totals directly: one
+        # pre-aggregated query, measured at 1.32s for 3,905 fixtures returning
+        # 35,518 rows — 0.09% of a ~25 min run. George, 2026-08-04.
         n_team = 0
-        for stat_id, label in ((cbit_id, "CBIT"), (rec_id, "Recoveries")):
-            if stat_id is None:
-                continue
-            _src = ps[ps["stats_type_id"] == stat_id]
-            if _full:
-                _src = _src[_src["fixture_id"].isin(_full)]
-            if _our_teams:
-                _src = _src[_src["team_id"].isin(_our_teams)]
-            agg = _src.groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
-            if agg.empty:
-                continue
-            ts = self.team_stats
-            existing = set(
-                map(tuple, ts.loc[ts["stats_type_id"] == stat_id, ["fixture_id", "team_id"]].values)
-            )
-            fresh = agg[
-                ~agg.apply(lambda r: (r["fixture_id"], r["team_id"]) in existing, axis=1)
-            ] if existing else agg
-            if fresh.empty:
-                continue
-            self.team_stats = pd.concat([ts, pd.DataFrame({
-                "fixture_id": fresh["fixture_id"].astype("int64"),
-                "team_id": fresh["team_id"].astype("int64"),
-                "stats_type_id": stat_id,
-                "value": fresh["value"].astype(float),
-            })], ignore_index=True)
-            n_team += len(fresh)
+        want = [i for i in (cbit_id, rec_id) if i is not None]
+        fixture_ids = sorted({int(x) for x in ps["fixture_id"].dropna().unique()})
+        if want and fixture_ids:
+            comp_sum = await self._team_totals_from_db(conn, fixture_ids, comp_ids, rec_id)
+            for stat_id in want:
+                sub = comp_sum.get(stat_id)
+                if sub is None or sub.empty:
+                    continue
+                ts = self.team_stats
+                existing = set(
+                    map(tuple, ts.loc[ts["stats_type_id"] == stat_id, ["fixture_id", "team_id"]].values)
+                )
+                fresh = sub[
+                    ~sub.apply(lambda r: (r["fixture_id"], r["team_id"]) in existing, axis=1)
+                ] if existing else sub
+                if fresh.empty:
+                    continue
+                self.team_stats = pd.concat([ts, pd.DataFrame({
+                    "fixture_id": fresh["fixture_id"].astype("int64"),
+                    "team_id": fresh["team_id"].astype("int64"),
+                    "stats_type_id": stat_id,
+                    "value": fresh["value"].astype(float),
+                })], ignore_index=True)
+                n_team += len(fresh)
 
         logger.info(
             "[CBIT derive] player rows added %d, team rows added %d (all leagues)",
             n_player, n_team,
         )
+
+    async def _team_totals_from_db(self, conn, fixture_ids, comp_ids, rec_id):
+        """{stat_id: DataFrame[fixture_id, team_id, value]} — true team totals.
+
+        CBIT is summed from its four Sportmonks components; Ball Recovery is
+        taken as-is. Aggregated in SQL over ALL players in each fixture, which
+        is the whole point: self.player_stats holds only the run's players.
+
+        Chunked at 1,500 fixtures. Measured 1.32s for 3,905 fixtures / 35,518
+        rows against a ~25 min run.
+        """
+        import pandas as pd
+        want = list(comp_ids) + ([rec_id] if rec_id is not None else [])
+        rows = []
+        for i in range(0, len(fixture_ids), 1500):
+            chunk = fixture_ids[i:i + 1500]
+            fph = ",".join(["%s"] * len(chunk))
+            sph = ",".join(["%s"] * len(want))
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""SELECT fixture_id, team_id, stats_type_id, SUM(value)
+                          FROM fixture_player_stats
+                         WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
+                         GROUP BY fixture_id, team_id, stats_type_id""",
+                    tuple(want) + tuple(chunk),
+                )
+                rows.extend(await cur.fetchall())
+        if not rows:
+            return {}
+        df = pd.DataFrame(rows, columns=["fixture_id", "team_id", "stats_type_id", "value"])
+        df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
+        out = {}
+        cbit = (
+            df[df["stats_type_id"].isin(comp_ids)]
+            .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+        )
+        out[self._cbit_stat_id] = cbit
+        if rec_id is not None:
+            out[rec_id] = (
+                df[df["stats_type_id"] == rec_id][["fixture_id", "team_id", "value"]]
+                .reset_index(drop=True)
+            )
+        return out
 
     def _load_local_files(self) -> None:
         """League Weightings.xlsx is the only non-DB reference. Loaded if
