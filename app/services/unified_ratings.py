@@ -77,10 +77,39 @@ MV_FADE_BY = float(os.getenv("UNIFIED_MV_FADE_BY", "0.75"))
 # while leaving the middle of the table essentially linear.
 MV_SOFT_CAP = float(os.getenv("UNIFIED_MV_SOFT_CAP", "2.5"))
 
-# Below this many usable outright markets the odds component is dropped
-# rather than trusted. A lone title market is one point at position 1: it
-# says a great deal about the favourite and almost nothing about 14th.
+# Below this many usable outright markets the full odds path is not
+# trusted. A lone title market is one point at position 1: it says a great
+# deal about the favourite and almost nothing about 14th. Leagues under
+# this threshold fall through to the PARTIAL path below rather than losing
+# the market entirely.
 MIN_ODDS_MARKETS = int(os.getenv("UNIFIED_MIN_ODDS_MARKETS", "3"))
+
+# --- partial odds, for thin books only -------------------------------------
+# Nine of the leagues we project carry only a title market. Dropping it
+# outright throws away real information about the favourites; using all of
+# it invents information about everyone else. So use the prices that are
+# genuinely opinions and ignore the rest.
+#
+# A price is an opinion if its de-vigged probability clears this floor.
+# Expressed as probability, not odds, because 101/1 means different things
+# in different books — in a league with three co-favourites the tail is far
+# flatter. Measured across Serie A, Liga Portugal, Belgium and the Super
+# Lig (2026-08-04): at 0.5% no unpriced team moves by more than 0.1 points
+# and the real disagreements are caught (Istanbul Basaksehir 5th on form at
+# 67/1 -> corrected 6 points; AC Milan mid-table on form at 6/1 -> +5.5).
+# At 0.2% it breaks — Moreirense gains 6.4 points off a 101/1 price.
+PARTIAL_ODDS_MIN_PROB = float(os.getenv("UNIFIED_PARTIAL_MIN_PROB", "0.005"))
+
+# Sigma cannot be self-calibrated from a single market — one bar per team
+# fits any spread perfectly — so it is fixed. 12 sits just above what the
+# deep books calibrate to (Premier League 10.9, La Liga 9.8, Bundesliga
+# 9.0) and is the gentler choice where it matters: teams near the floor are
+# the most sigma-sensitive, the short prices barely move with it.
+PARTIAL_ODDS_SIGMA = float(os.getenv("UNIFIED_PARTIAL_SIGMA", "12.0"))
+
+# This path applies ONLY to thin books. Leagues clearing MIN_ODDS_MARKETS
+# keep the full path unchanged — the point of this is to rescue leagues
+# with poor coverage, not to alter the ones that are already well served.
 
 # Attack/defence floor as a fraction of the league mean, so no blend can
 # drive a goal rate to zero or negative.
@@ -344,6 +373,60 @@ async def implied_points(conn, competition_id, season_id, bars, team_ids,
     return points, len(used), sigma, pivot
 
 
+async def implied_points_partial(conn, competition_id, season_id, bars, team_ids,
+                                 n_teams, releg, now=None):
+    """Expected points from a THIN book, using only the informative prices.
+
+    Same machinery as implied_points, with three differences:
+
+      * a price is used only if its de-vigged probability clears
+        PARTIAL_ODDS_MIN_PROB — beyond that the book is filling shelves,
+        not expressing a view, and the fit cannot separate 500/1 from
+        750/1;
+      * sigma is fixed rather than calibrated, because a single bar per
+        team fits any sigma perfectly;
+      * no pivot is returned. The caller anchors the result on where form
+        and squad value already place these teams, because a thin book
+        knows the ORDER of the teams it prices but not where that group
+        sits relative to the rest of the league.
+
+    Returns {team_id: points} for the qualifying teams only.
+    """
+    odds_df = await ts.load_outright_odds(conn, competition_id, season_id)
+    if odds_df is None or odds_df.empty:
+        return {}
+    now = now or pd.Timestamp.utcnow().tz_localize(None)
+
+    dots = {int(t): [] for t in team_ids}
+    for market_id, (pos, anchor) in MARKET_POS.items():
+        if bars.get(market_id) is None:
+            continue
+        rows = ts._pick_provider_rows(odds_df, market_id, list(dots), now)
+        if rows is None or rows.empty:
+            continue
+        if rows['odd_decimal'].nunique() <= 1 and len(rows) > 3:
+            continue
+        band_key = BAND[market_id]
+        band = (n_teams // 2 if band_key == 'half'
+                else releg if band_key == 'releg' else band_key)
+        if not band:
+            continue
+        probs = power_devig(rows['odd_decimal'].astype(float).tolist(), band)
+        for team_id, p in zip(rows['team_id'].astype(int), probs):
+            if team_id not in dots:
+                continue
+            if anchor == 'b' and team_id in ts.NO_TAIL_TEAM_IDS:
+                continue
+            # Saturated at either end tells us only "far from this bar",
+            # never how far.
+            if p < PARTIAL_ODDS_MIN_PROB or p > 1.0 - PARTIAL_ODDS_MIN_PROB:
+                continue
+            p_above = p if anchor == 't' else 1.0 - p
+            dots[team_id].append((bars[market_id], min(max(p_above, 1e-6), 1 - 1e-6)))
+
+    return {t: fit_points(d, PARTIAL_ODDS_SIGMA)[0] for t, d in dots.items() if d}
+
+
 # --- the blend -------------------------------------------------------------
 
 async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
@@ -374,10 +457,12 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
     d_idx = pd.to_numeric(ratings['Defense'], errors='coerce') / defence_mean * 100.0
     form_overall = (a_idx - d_idx) / 2.0
     spread = float((a_idx.std(ddof=0) + d_idx.std(ddof=0)) / 2.0)
+    team_index = {t: i for i, t in enumerate(ratings['Team'])}
 
     releg = relegation_places(competition_id)
     consts = await league_constants(conn, competition_id, releg, n_teams)
     odds_overall = {}
+    odds_is_partial = False
     if consts is None:
         logger.info("  no standings history for competition %s — odds component unavailable",
                     competition_id)
@@ -387,8 +472,28 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
         points, n_markets, _sigma, pivot = await implied_points(
             conn, competition_id, season_id, bars, ids, n_teams, releg, now=now)
         if n_markets < MIN_ODDS_MARKETS or pivot is None:
-            logger.info("  odds component DROPPED — %d usable market(s), need %d",
-                        n_markets, MIN_ODDS_MARKETS)
+            # Thin book: keep only the prices that are genuinely opinions.
+            partial = await implied_points_partial(
+                conn, competition_id, season_id, bars, ids, n_teams, releg, now=now)
+            if not partial:
+                logger.info("  odds component DROPPED — %d usable market(s), "
+                            "none clearing the %.1f%% floor",
+                            n_markets, PARTIAL_ODDS_MIN_PROB * 100)
+            else:
+                n_games = max(1, (n_teams - 1) * 2)
+                for name, team_id in team_ids_by_name.items():
+                    if team_id is None:
+                        continue
+                    pts = partial.get(int(team_id))
+                    if pts is None:
+                        continue
+                    gd_per_match = (pts - mean_points) * gd_per_point / n_games
+                    odds_overall[name] = (gd_per_match / 2.0) / goals_per_game * 100.0
+                odds_is_partial = True
+                logger.info("  odds component PARTIAL — %d market(s), %d of %d teams "
+                            "clear the %.1f%% floor",
+                            n_markets, len(odds_overall), n_teams,
+                            PARTIAL_ODDS_MIN_PROB * 100)
         else:
             logger.info("  league constants from %d seasons: mean pts %.1f, GD per point %.3f",
                         n_seasons, mean_points, gd_per_point)
@@ -423,6 +528,37 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
                     mv_overall[t] = z * spread
 
     w_form, w_mv, w_odds = blend_weights(matches_played, games_in_season)
+
+    if odds_is_partial and odds_overall:
+        # Anchor the thin-book component on where form and squad value
+        # already put these same teams.
+        #
+        # The fit is pivoted on the league's HISTORICAL mean points, which
+        # assumes the market can tell you where the mean is. A lone title
+        # market cannot: with the bar around 88 points and sigma 12, any
+        # non-zero title chance implies an above-average total, so every
+        # priced team floats upward and the rest of the league is pushed
+        # down to compensate. Liga Portugal prices 12 of 18 teams and
+        # drifted +4.9 points a team that way, lifting a 101/1 shot by 12.8
+        # while taxing Benfica 5.8 to pay for it (2026-08-04).
+        #
+        # A thin book knows the ORDER of the teams it prices, not where that
+        # group belongs. Form and squad value know the latter. After this,
+        # teams the market never mentioned do not move at all.
+        priced = list(odds_overall)
+        odds_mu = sum(odds_overall.values()) / len(priced)
+        base_mu = 0.0
+        for t in priced:
+            i = team_index.get(t)
+            f = float(form_overall.iloc[i]) if i is not None else 0.0
+            m = mv_overall.get(t)
+            wf, wm = w_form, (w_mv if m is not None else 0.0)
+            base_mu += (wf * f + wm * (m or 0.0)) / (wf + wm)
+        base_mu /= len(priced)
+        shift = base_mu - odds_mu
+        odds_overall = {k: v + shift for k, v in odds_overall.items()}
+        logger.info("  partial odds anchored: shifted %+.1f onto the form+MV level "
+                    "of the %d priced team(s)", shift, len(priced))
     logger.info("  unified weights: form %.2f / MV %.2f / odds %.2f (%s of %s matches played)",
                 w_form, w_mv, w_odds, matches_played, games_in_season)
 
