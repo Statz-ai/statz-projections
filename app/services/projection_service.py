@@ -29,6 +29,27 @@ from fastapi import Response
 
 logger = logging.getLogger("projection")
 
+# Team-down defensive columns that must SURVIVE the explicit column filters in
+# the FPL branch. distribute_team_predictions_to_players propagates them from
+# team_projections via pivot; anything not named here is dropped before the
+# team-down CBIT post-pass reads it, and the post-pass silently falls back to
+# `Tackles + CBI(FPL)`.
+#
+# That fallback is why this is a shared constant rather than four copies of a
+# literal. The combined CBIT column (999003) was added 2026-08-04 but not to
+# the four allow-lists, so the whole "one combined CBIT" rework was inert —
+# every player kept scoring on the old three-component path. Promoted clubs
+# were the visible casualty: CBI(FPL) is Premier League only, so Coventry /
+# Hull / Ipswich ran on TACKLES ALONE and projected ~0% DefCon (Bobby Thomas
+# 1.6E-9 against a true ~8.5 CBIT per 90). George, 2026-08-04.
+FPL_DEF_EXTRA_COLS = [
+    'Ball Recovery',
+    'Clearances Blocks Interceptions (FPL)',
+    'Clearances Blocks Interceptions Tackles (FPL)',
+    'Big Chances Created',
+]
+
+
 class _NoPromotedRatings(Exception):
     """Sentinel: no promoted ratings configured for the league (no DB rows,
     no xlsx). Raised inside the promoted-blend try-block to skip the rest of
@@ -1779,8 +1800,7 @@ class ProjectionService:
         # them from team_projections via pivot; without this they'd be
         # dropped here and the post-pass would compute hit rate on Tackles
         # alone (giving ~0% for everyone).
-        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
-                      if c in pl_projections.columns]
+        _def_extra = [c for c in FPL_DEF_EXTRA_COLS if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
              'Start?',
@@ -1798,8 +1818,7 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
-        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
-                       if c in pl_projections.columns]
+        _def_extra2 = [c for c in FPL_DEF_EXTRA_COLS if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
               'Goals', 'Assists', 'Key Passes', 'Accurate Passes',
@@ -4683,8 +4702,7 @@ class ProjectionService:
         # them from team_projections via pivot; without this they'd be
         # dropped here and the post-pass would compute hit rate on Tackles
         # alone (giving ~0% for everyone).
-        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
-                      if c in pl_projections.columns]
+        _def_extra = [c for c in FPL_DEF_EXTRA_COLS if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
              'Start?',
@@ -4702,8 +4720,7 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
-        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Big Chances Created']
-                       if c in pl_projections.columns]
+        _def_extra2 = [c for c in FPL_DEF_EXTRA_COLS if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
               'Goals', 'Assists', 'Key Passes', 'Accurate Passes',
