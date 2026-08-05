@@ -1531,13 +1531,29 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
-            # Tackles Won rides the team's TACKLES total — there is no team-level
-            # tackles-won stat and deriving one was not worth a second team
-            # projection (George, 2026-08-05). The share carries the conversion:
-            # get_player_stats maps this stat's denominator to 'Tackles'
-            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
-            # player's personal success rate is folded in automatically.
-            team_projections['Tackles Won'] = team_projections['Tackles']
+            # Tackles Won rides a team TACKLES total, and that total is
+            # CBIT - CBI rather than the modelled 'Tackles' column. Measured
+            # against 760 real PL team-matches: the model averages 14.37 against
+            # an actual 16.69 (-13.9%), while CBIT - CBI gives 15.74 (-5.7%) —
+            # the two blended quantities are uniformly ~7% light, so their
+            # DIFFERENCE tracks tackles better than the dedicated model does.
+            # George called it before it was measured, 2026-08-05.
+            #
+            # It also makes BPS reconcile with DefCon by construction: BPS scores
+            # CBI + tackles = CBI + (CBIT - CBI) = CBIT, the exact quantity the
+            # DefCon threshold uses. Projecting the two separately had them
+            # disagreeing by 10-14% on promoted clubs (Coventry 58.05 vs 51.00).
+            #
+            # The SHARE is unchanged and still measured from history — his
+            # tackles won over his team's actual tackles (_TEAM_DENOMINATOR_ALIAS
+            # maps the denominator to 'Tackles'), so a player's personal success
+            # rate is folded in automatically.
+            _tkl_from_cbit = (team_projections['Clearances Blocks Interceptions Tackles (FPL)']
+                              - team_projections['Clearances Blocks Interceptions (FPL)'])
+            # A fixture where the CBI blend outruns the CBIT blend would give a
+            # negative tackle count; fall back to the modelled column there.
+            team_projections['Tackles Won'] = _tkl_from_cbit.where(
+                _tkl_from_cbit > 0, team_projections['Tackles'])
 
         saves = []
         for i in range(len(team_projections)):
@@ -3911,13 +3927,29 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
-            # Tackles Won rides the team's TACKLES total — there is no team-level
-            # tackles-won stat and deriving one was not worth a second team
-            # projection (George, 2026-08-05). The share carries the conversion:
-            # get_player_stats maps this stat's denominator to 'Tackles'
-            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
-            # player's personal success rate is folded in automatically.
-            team_projections['Tackles Won'] = team_projections['Tackles']
+            # Tackles Won rides a team TACKLES total, and that total is
+            # CBIT - CBI rather than the modelled 'Tackles' column. Measured
+            # against 760 real PL team-matches: the model averages 14.37 against
+            # an actual 16.69 (-13.9%), while CBIT - CBI gives 15.74 (-5.7%) —
+            # the two blended quantities are uniformly ~7% light, so their
+            # DIFFERENCE tracks tackles better than the dedicated model does.
+            # George called it before it was measured, 2026-08-05.
+            #
+            # It also makes BPS reconcile with DefCon by construction: BPS scores
+            # CBI + tackles = CBI + (CBIT - CBI) = CBIT, the exact quantity the
+            # DefCon threshold uses. Projecting the two separately had them
+            # disagreeing by 10-14% on promoted clubs (Coventry 58.05 vs 51.00).
+            #
+            # The SHARE is unchanged and still measured from history — his
+            # tackles won over his team's actual tackles (_TEAM_DENOMINATOR_ALIAS
+            # maps the denominator to 'Tackles'), so a player's personal success
+            # rate is folded in automatically.
+            _tkl_from_cbit = (team_projections['Clearances Blocks Interceptions Tackles (FPL)']
+                              - team_projections['Clearances Blocks Interceptions (FPL)'])
+            # A fixture where the CBI blend outruns the CBIT blend would give a
+            # negative tackle count; fall back to the modelled column there.
+            team_projections['Tackles Won'] = _tkl_from_cbit.where(
+                _tkl_from_cbit > 0, team_projections['Tackles'])
 
         saves = []
         for i in range(len(team_projections)):
@@ -4592,13 +4624,29 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
-            # Tackles Won rides the team's TACKLES total — there is no team-level
-            # tackles-won stat and deriving one was not worth a second team
-            # projection (George, 2026-08-05). The share carries the conversion:
-            # get_player_stats maps this stat's denominator to 'Tackles'
-            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
-            # player's personal success rate is folded in automatically.
-            team_projections['Tackles Won'] = team_projections['Tackles']
+            # Tackles Won rides a team TACKLES total, and that total is
+            # CBIT - CBI rather than the modelled 'Tackles' column. Measured
+            # against 760 real PL team-matches: the model averages 14.37 against
+            # an actual 16.69 (-13.9%), while CBIT - CBI gives 15.74 (-5.7%) —
+            # the two blended quantities are uniformly ~7% light, so their
+            # DIFFERENCE tracks tackles better than the dedicated model does.
+            # George called it before it was measured, 2026-08-05.
+            #
+            # It also makes BPS reconcile with DefCon by construction: BPS scores
+            # CBI + tackles = CBI + (CBIT - CBI) = CBIT, the exact quantity the
+            # DefCon threshold uses. Projecting the two separately had them
+            # disagreeing by 10-14% on promoted clubs (Coventry 58.05 vs 51.00).
+            #
+            # The SHARE is unchanged and still measured from history — his
+            # tackles won over his team's actual tackles (_TEAM_DENOMINATOR_ALIAS
+            # maps the denominator to 'Tackles'), so a player's personal success
+            # rate is folded in automatically.
+            _tkl_from_cbit = (team_projections['Clearances Blocks Interceptions Tackles (FPL)']
+                              - team_projections['Clearances Blocks Interceptions (FPL)'])
+            # A fixture where the CBI blend outruns the CBIT blend would give a
+            # negative tackle count; fall back to the modelled column there.
+            team_projections['Tackles Won'] = _tkl_from_cbit.where(
+                _tkl_from_cbit > 0, team_projections['Tackles'])
 
         saves = []
         for i in range(len(team_projections)):
@@ -5434,13 +5482,29 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
-            # Tackles Won rides the team's TACKLES total — there is no team-level
-            # tackles-won stat and deriving one was not worth a second team
-            # projection (George, 2026-08-05). The share carries the conversion:
-            # get_player_stats maps this stat's denominator to 'Tackles'
-            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
-            # player's personal success rate is folded in automatically.
-            team_projections['Tackles Won'] = team_projections['Tackles']
+            # Tackles Won rides a team TACKLES total, and that total is
+            # CBIT - CBI rather than the modelled 'Tackles' column. Measured
+            # against 760 real PL team-matches: the model averages 14.37 against
+            # an actual 16.69 (-13.9%), while CBIT - CBI gives 15.74 (-5.7%) —
+            # the two blended quantities are uniformly ~7% light, so their
+            # DIFFERENCE tracks tackles better than the dedicated model does.
+            # George called it before it was measured, 2026-08-05.
+            #
+            # It also makes BPS reconcile with DefCon by construction: BPS scores
+            # CBI + tackles = CBI + (CBIT - CBI) = CBIT, the exact quantity the
+            # DefCon threshold uses. Projecting the two separately had them
+            # disagreeing by 10-14% on promoted clubs (Coventry 58.05 vs 51.00).
+            #
+            # The SHARE is unchanged and still measured from history — his
+            # tackles won over his team's actual tackles (_TEAM_DENOMINATOR_ALIAS
+            # maps the denominator to 'Tackles'), so a player's personal success
+            # rate is folded in automatically.
+            _tkl_from_cbit = (team_projections['Clearances Blocks Interceptions Tackles (FPL)']
+                              - team_projections['Clearances Blocks Interceptions (FPL)'])
+            # A fixture where the CBI blend outruns the CBIT blend would give a
+            # negative tackle count; fall back to the modelled column there.
+            team_projections['Tackles Won'] = _tkl_from_cbit.where(
+                _tkl_from_cbit > 0, team_projections['Tackles'])
 
         saves = []
         for i in range(len(team_projections)):
