@@ -204,8 +204,11 @@ FRAME_TO_SIM = {
     "Big Chances Missed": "big_chances_missed",
     "Shots Total": "shots",
     "Shots On Target": "shots_on_target",
-    "Ball Recovery Average": "recoveries",
-    "Tackles Won Average": "tackles_won",
+    # Team-down PROJECTIONS, not the "* Average" career means these used to
+    # read. The Averages are identical in every fixture, so a defender's bonus
+    # never moved with the opponent even though his DefCon did.
+    "Ball Recovery": "recoveries",
+    "Tackles Won": "tackles_won",
     "Successful Dribbles": "dribbles",
     "Fouls": "fouls",
     "Fouls Drawn": "fouls_drawn",
@@ -217,6 +220,9 @@ FRAME_TO_SIM = {
 
 # CBI has no single frame column — Sportmonks tracks the three components
 # separately, and bonus_points_score sums them the same way.
+# Projected team-down CBI, replacing the sum of three career-average columns.
+# Falls back to the old parts when the FPL-only combined column is absent.
+CBI_PROJECTED = "Clearances Blocks Interceptions (FPL)"
 CBI_PARTS = ("Clearances Average", "Blocked Shots Average", "Interceptions")
 
 POSITION_CODES = {"GK": fpl_bps.GK, "DEF": fpl_bps.DEF, "MID": fpl_bps.MID, "FWD": fpl_bps.FWD}
@@ -307,7 +313,8 @@ def simulate_bonus_for_frame(frame, score_preds, n_samples=DEFAULT_SAMPLES):
             }
             for col, key in FRAME_TO_SIM.items():
                 p[key] = _rate(row, col)
-            p["cbi"] = sum(_rate(row, c) for c in CBI_PARTS)
+            _cbi_proj = _rate(row, CBI_PROJECTED) if (CBI_PROJECTED + PER90) in row else 0.0
+            p["cbi"] = _cbi_proj if _cbi_proj > 0 else sum(_rate(row, c) for c in CBI_PARTS)
             passes = p.get("passes", 0.0)
             acc = _rate(row, "Accurate Passes")
             p["pass_completion"] = min(acc / passes, 1.0) if passes > 0 else 0.8

@@ -46,6 +46,7 @@ FPL_DEF_EXTRA_COLS = [
     'Ball Recovery',
     'Clearances Blocks Interceptions (FPL)',
     'Clearances Blocks Interceptions Tackles (FPL)',
+    'Tackles Won',
     'Big Chances Created',
 ]
 
@@ -1530,6 +1531,13 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
+            # Tackles Won rides the team's TACKLES total — there is no team-level
+            # tackles-won stat and deriving one was not worth a second team
+            # projection (George, 2026-08-05). The share carries the conversion:
+            # get_player_stats maps this stat's denominator to 'Tackles'
+            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
+            # player's personal success rate is folded in automatically.
+            team_projections['Tackles Won'] = team_projections['Tackles']
 
         saves = []
         for i in range(len(team_projections)):
@@ -1557,7 +1565,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -3903,6 +3911,13 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
+            # Tackles Won rides the team's TACKLES total — there is no team-level
+            # tackles-won stat and deriving one was not worth a second team
+            # projection (George, 2026-08-05). The share carries the conversion:
+            # get_player_stats maps this stat's denominator to 'Tackles'
+            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
+            # player's personal success rate is folded in automatically.
+            team_projections['Tackles Won'] = team_projections['Tackles']
 
         saves = []
         for i in range(len(team_projections)):
@@ -3924,7 +3939,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4577,6 +4592,13 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
+            # Tackles Won rides the team's TACKLES total — there is no team-level
+            # tackles-won stat and deriving one was not worth a second team
+            # projection (George, 2026-08-05). The share carries the conversion:
+            # get_player_stats maps this stat's denominator to 'Tackles'
+            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
+            # player's personal success rate is folded in automatically.
+            team_projections['Tackles Won'] = team_projections['Tackles']
 
         saves = []
         for i in range(len(team_projections)):
@@ -4604,7 +4626,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -5412,6 +5434,13 @@ class ProjectionService:
             team_projections['Ball Recovery'] = _rec_col
             team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
             team_projections['Clearances Blocks Interceptions Tackles (FPL)'] = _cbit_col
+            # Tackles Won rides the team's TACKLES total — there is no team-level
+            # tackles-won stat and deriving one was not worth a second team
+            # projection (George, 2026-08-05). The share carries the conversion:
+            # get_player_stats maps this stat's denominator to 'Tackles'
+            # (_TEAM_DENOMINATOR_ALIAS), so share = his won / team tackles and a
+            # player's personal success rate is folded in automatically.
+            team_projections['Tackles Won'] = team_projections['Tackles']
 
         saves = []
         for i in range(len(team_projections)):
@@ -5439,7 +5468,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',

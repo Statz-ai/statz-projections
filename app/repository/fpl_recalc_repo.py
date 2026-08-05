@@ -37,6 +37,11 @@ BUNDLE_COLS = [
     # position-dependent denominator. Without it recalc left def_con_pct stale
     # on every band edit. George, 2026-08-04.
     'dc_rate90',
+    # Team-down defensive projections the bonus simulator now scores BPS from
+    # (replacing the "* Average" career means). Without these in the bundle the
+    # recalc path would fall back to the Averages and score bonus off different
+    # numbers than the run did.
+    'Tackles Won', 'Ball Recovery', 'Clearances Blocks Interceptions (FPL)',
     'xmin_p_play', 'xmin_p60', 'xmin_p90', 'xmin_bands', 'xmin_start_len',
 ] + [
     # Per-90 companions (xminutes.PER90_SUFFIX). The bonus simulator samples a
@@ -50,6 +55,7 @@ BUNDLE_COLS = [
         'Saves', 'Interceptions', 'Total Crosses', 'Successful Dribbles',
         'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average',
         'Tackles Won Average',
+        'Tackles Won', 'Ball Recovery', 'Clearances Blocks Interceptions (FPL)',
     )
 ]
 

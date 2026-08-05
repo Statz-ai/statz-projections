@@ -1669,6 +1669,22 @@ def get_player_id(player_name, player_df, team, teams, competition_id=None, comp
 
 
 # UPDATED - New Parameters: comps and include_international
+# Player stats whose SHARE DENOMINATOR is a differently-named team stat,
+# because no team-level column exists for the stat itself.
+#
+# 'Tackles Won' rides the team's 'Tackles' total, so the share is
+#     his tackles WON / team tackles
+# which folds his personal tackle-success rate into the share itself — a
+# player who wins 43% of his challenges simply lands a smaller share than one
+# who wins 75%, with no separate rate to model or maintain. Measured across
+# 177 PL players with 30+ tackles: mean success 0.596, sd 0.069, range
+# 0.43-0.76, so that spread is worth carrying. George, 2026-08-05.
+_TEAM_DENOMINATOR_ALIAS = {
+    'Accurate Passes': 'Successful Passes',
+    'Tackles Won': 'Tackles',
+}
+
+
 def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, comps, mins=50, games=None,
                      include_international=False):
     player_df = stat_df[stat_df['player_id'] == player_id]
@@ -1778,7 +1794,7 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     # by (team_id, fixture_id, stats_type_id) for every player row.
     # Three cases:
     #   - Fouls Drawn → look up the OPPONENT's Fouls value (team_id != player's team_id)
-    #   - Accurate Passes → look up the team's "Successful Passes" stat
+    #   - _TEAM_DENOMINATOR_ALIAS stats → look up a DIFFERENTLY NAMED team stat
     #   - Everything else → look up the team's own value for this stat
     # Missing data preserves the original fall-through to 0 via fillna(0).
     _team_col = f'Team {stat}'
@@ -1795,7 +1811,7 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
             .drop_duplicates(subset=['fixture_id', 'team_id'])
         )
     else:
-        _lookup_stat_name = 'Successful Passes' if stat == 'Accurate Passes' else stat
+        _lookup_stat_name = _TEAM_DENOMINATOR_ALIAS.get(stat, stat)
         _target_stat_id = get_stat_id(_lookup_stat_name, stats_types)
         _target_team_rows = team_df[team_df['stats_type_id'] == _target_stat_id]
         if _target_team_rows.empty and not team_df.empty:

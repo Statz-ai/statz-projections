@@ -112,6 +112,11 @@ XMIN_SCALED_STAT_COLS = [
     # the DefCon hit rate would be computed on full-start actions for a player
     # projected to play 30.
     "Clearances Blocks Interceptions Tackles (FPL)",
+    # Projected tackles won (team Tackles x the won/tackles share). Replaces
+    # "Tackles Won Average" as the BPS input — the Average is a frozen career
+    # number, identical in every fixture, so bonus never responded to the
+    # opponent while DefCon did.
+    "Tackles Won",
     "Clearances Average", "Blocked Shots Average", "Ball Recovery Average",
     "Tackles Won Average", "CBIT Average",
 ]
