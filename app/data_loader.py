@@ -1143,21 +1143,38 @@ class LeagueDataLoader:
                 if sub is None or sub.empty:
                     continue
                 ts = self.team_stats
-                existing = set(
-                    map(tuple, ts.loc[ts["stats_type_id"] == stat_id, ["fixture_id", "team_id"]].values)
-                )
-                fresh = sub[
-                    ~sub.apply(lambda r: (r["fixture_id"], r["team_id"]) in existing, axis=1)
-                ] if existing else sub
-                if fresh.empty:
-                    continue
+                # REPLACE any existing team row, do not merely fill the gaps.
+                # The FPL overlay writes team CBIT / recoveries by summing the
+                # FPL rows, which cover FPL-MAPPED PLAYERS ONLY — so its team
+                # total silently omits anyone unmapped. Measured 2026-08-05
+                # over 760 PL team-matches: FPL sums 54.62 CBIT per match
+                # against 55.59 from every player's Sportmonks components, so
+                # the history the projection learns from ran 1.7% light and
+                # every team CBIT projection inherited that.
+                #
+                # This is the same partial-squad trap that gave Abdulkadir Omur
+                # a 99.89% DefCon; it was fixed for the player side and left on
+                # the team side. _team_totals_from_db aggregates over ALL
+                # players in SQL, so it is strictly the better number wherever
+                # the two disagree. George, 2026-08-05.
+                keys = set(map(tuple, sub[["fixture_id", "team_id"]].astype("int64").values))
+                if not ts.empty:
+                    _same_stat = ts["stats_type_id"] == stat_id
+                    _pairs = list(zip(ts["fixture_id"], ts["team_id"]))
+                    _drop = _same_stat & pd.Series(
+                        [(int(f), int(t)) in keys if pd.notna(f) and pd.notna(t) else False
+                         for f, t in _pairs],
+                        index=ts.index,
+                    )
+                    if _drop.any():
+                        ts = ts[~_drop]
                 self.team_stats = pd.concat([ts, pd.DataFrame({
-                    "fixture_id": fresh["fixture_id"].astype("int64"),
-                    "team_id": fresh["team_id"].astype("int64"),
+                    "fixture_id": sub["fixture_id"].astype("int64"),
+                    "team_id": sub["team_id"].astype("int64"),
                     "stats_type_id": stat_id,
-                    "value": fresh["value"].astype(float),
+                    "value": sub["value"].astype(float),
                 })], ignore_index=True)
-                n_team += len(fresh)
+                n_team += len(sub)
 
         logger.info(
             "[CBIT derive] player rows added %d, team rows added %d (all leagues)",

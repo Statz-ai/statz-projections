@@ -1535,7 +1535,7 @@ class ProjectionService:
                 # and removes the three inconsistent notions the pipeline
                 # carried. George, 2026-08-04.
                 try:
-                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                    cbit_v, _cbit_th, _cbit_oh = get_simple_team_stat_prediction(
                         _row['Team'], _row['Opponent'], fixtures_df,
                         'Clearances Blocks Interceptions Tackles (FPL)',
                         team_stats, teams, stats_types,
@@ -1545,6 +1545,21 @@ class ProjectionService:
                     )
                 except Exception:
                     cbit_v = 0
+                    _cbit_th = _cbit_oh = None
+                # Diagnostic for the ~5% under-projection measured 2026-08-05
+                # (projected 51.88 CBIT/match against an actual 55.59; 13 of 15
+                # clubs low, and NOT explained by opponent mix or missing
+                # history). The blend is
+                #     alpha * team_history + (1-alpha) * opponent_history
+                # and both terms are returned but discarded, so log them for a
+                # handful of fixtures to see which side is light before
+                # guessing at the cause.
+                if i < 6:
+                    logger.info(
+                        f"[{league}] CBIT blend probe: {_row['Team']} vs {_row['Opponent']} "
+                        f"({_row['Venue']}) team_hist={_cbit_th} opp_hist={_cbit_oh} "
+                        f"-> blended={cbit_v}"
+                    )
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
                 _cbit_col.append(cbit_v)
@@ -3961,7 +3976,7 @@ class ProjectionService:
                 # and removes the three inconsistent notions the pipeline
                 # carried. George, 2026-08-04.
                 try:
-                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                    cbit_v, _cbit_th, _cbit_oh = get_simple_team_stat_prediction(
                         _row['Team'], _row['Opponent'], fixtures_df,
                         'Clearances Blocks Interceptions Tackles (FPL)',
                         team_stats, teams, stats_types,
@@ -3971,6 +3986,21 @@ class ProjectionService:
                     )
                 except Exception:
                     cbit_v = 0
+                    _cbit_th = _cbit_oh = None
+                # Diagnostic for the ~5% under-projection measured 2026-08-05
+                # (projected 51.88 CBIT/match against an actual 55.59; 13 of 15
+                # clubs low, and NOT explained by opponent mix or missing
+                # history). The blend is
+                #     alpha * team_history + (1-alpha) * opponent_history
+                # and both terms are returned but discarded, so log them for a
+                # handful of fixtures to see which side is light before
+                # guessing at the cause.
+                if i < 6:
+                    logger.info(
+                        f"[{league}] CBIT blend probe: {_row['Team']} vs {_row['Opponent']} "
+                        f"({_row['Venue']}) team_hist={_cbit_th} opp_hist={_cbit_oh} "
+                        f"-> blended={cbit_v}"
+                    )
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
                 _cbit_col.append(cbit_v)
@@ -4664,7 +4694,7 @@ class ProjectionService:
                 # and removes the three inconsistent notions the pipeline
                 # carried. George, 2026-08-04.
                 try:
-                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                    cbit_v, _cbit_th, _cbit_oh = get_simple_team_stat_prediction(
                         _row['Team'], _row['Opponent'], fixtures_df,
                         'Clearances Blocks Interceptions Tackles (FPL)',
                         team_stats, teams, stats_types,
@@ -4674,6 +4704,21 @@ class ProjectionService:
                     )
                 except Exception:
                     cbit_v = 0
+                    _cbit_th = _cbit_oh = None
+                # Diagnostic for the ~5% under-projection measured 2026-08-05
+                # (projected 51.88 CBIT/match against an actual 55.59; 13 of 15
+                # clubs low, and NOT explained by opponent mix or missing
+                # history). The blend is
+                #     alpha * team_history + (1-alpha) * opponent_history
+                # and both terms are returned but discarded, so log them for a
+                # handful of fixtures to see which side is light before
+                # guessing at the cause.
+                if i < 6:
+                    logger.info(
+                        f"[{league}] CBIT blend probe: {_row['Team']} vs {_row['Opponent']} "
+                        f"({_row['Venue']}) team_hist={_cbit_th} opp_hist={_cbit_oh} "
+                        f"-> blended={cbit_v}"
+                    )
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
                 _cbit_col.append(cbit_v)
@@ -5528,7 +5573,7 @@ class ProjectionService:
                 # and removes the three inconsistent notions the pipeline
                 # carried. George, 2026-08-04.
                 try:
-                    cbit_v, _, _ = get_simple_team_stat_prediction(
+                    cbit_v, _cbit_th, _cbit_oh = get_simple_team_stat_prediction(
                         _row['Team'], _row['Opponent'], fixtures_df,
                         'Clearances Blocks Interceptions Tackles (FPL)',
                         team_stats, teams, stats_types,
@@ -5538,6 +5583,21 @@ class ProjectionService:
                     )
                 except Exception:
                     cbit_v = 0
+                    _cbit_th = _cbit_oh = None
+                # Diagnostic for the ~5% under-projection measured 2026-08-05
+                # (projected 51.88 CBIT/match against an actual 55.59; 13 of 15
+                # clubs low, and NOT explained by opponent mix or missing
+                # history). The blend is
+                #     alpha * team_history + (1-alpha) * opponent_history
+                # and both terms are returned but discarded, so log them for a
+                # handful of fixtures to see which side is light before
+                # guessing at the cause.
+                if i < 6:
+                    logger.info(
+                        f"[{league}] CBIT blend probe: {_row['Team']} vs {_row['Opponent']} "
+                        f"({_row['Venue']}) team_hist={_cbit_th} opp_hist={_cbit_oh} "
+                        f"-> blended={cbit_v}"
+                    )
                 _rec_col.append(rec_v)
                 _cbi_col.append(cbi_v)
                 _cbit_col.append(cbit_v)
