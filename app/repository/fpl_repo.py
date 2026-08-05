@@ -33,6 +33,11 @@ async def insert_fpl_projections_async(data_list):
     has_bonus = "bonus" in df.columns
     has_def_con = "def_con_pct" in df.columns
     has_xmin = "expected_minutes" in df.columns
+    # Per-stat DIALLED projections (projection_service.FPL_STAT_COLUMNS). The
+    # detail tiles read these instead of player_projections, which is written by
+    # the non-FPL pipeline and has no knowledge of dials.
+    _stat_cols = ["proj_goals", "proj_assists", "proj_saves",
+                  "proj_key_passes", "proj_sot", "proj_tackles"]
 
     def _int_or_none(v):
         if v is None:
@@ -73,6 +78,7 @@ async def insert_fpl_projections_async(data_list):
             _int_or_none(row.get("gameweek_id")) if has_gw else None,
             _int_or_none(row.get("team_id")) if has_team else None,
             _int_or_none(row.get("opponent_id")) if has_opp else None,
+            *[_float_or_none(row.get(c)) if c in df.columns else None for c in _stat_cols],
         )
         for _, row in df.iterrows()
     ]
@@ -82,8 +88,9 @@ async def insert_fpl_projections_async(data_list):
         fixture_id, player_id, kickoff_datetime, venue, fpl_points,
         bonus, def_con_pct, expected_minutes,
         gameweek_id, team_id, opponent_id,
+        proj_goals, proj_assists, proj_saves, proj_key_passes, proj_sot, proj_tackles,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     AS new
     ON DUPLICATE KEY UPDATE
         fpl_points = new.fpl_points,
@@ -93,6 +100,12 @@ async def insert_fpl_projections_async(data_list):
         gameweek_id = new.gameweek_id,
         team_id = new.team_id,
         opponent_id = new.opponent_id,
+        proj_goals = new.proj_goals,
+        proj_assists = new.proj_assists,
+        proj_saves = new.proj_saves,
+        proj_key_passes = new.proj_key_passes,
+        proj_sot = new.proj_sot,
+        proj_tackles = new.proj_tackles,
         updated_at = NOW()
     """
     return await execute_chunked(sql, values, label="[fpl_projections]")

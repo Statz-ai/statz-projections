@@ -42,6 +42,19 @@ logger = logging.getLogger("projection")
 # were the visible casualty: CBI(FPL) is Premier League only, so Coventry /
 # Hull / Ipswich ran on TACKLES ALONE and projected ~0% DefCon (Bobby Thomas
 # 1.6E-9 against a true ~8.5 CBIT per 90). George, 2026-08-04.
+# Player-level stat columns persisted onto fpl_projections so the FPL detail
+# tiles can read DIALLED values. frame column -> DB column. Team-level tiles
+# (clean sheet %, xGC) come from fixture_projections and are not affected by a
+# player dial, so they stay where they are.
+FPL_STAT_COLUMNS = {
+    'Goals': 'proj_goals',
+    'Assists': 'proj_assists',
+    'Saves': 'proj_saves',
+    'Key Passes': 'proj_key_passes',
+    'Shots On Target': 'proj_sot',
+    'Tackles': 'proj_tackles',
+}
+
 FPL_DEF_EXTRA_COLS = [
     'Ball Recovery',
     'Clearances Blocks Interceptions (FPL)',
@@ -2461,7 +2474,25 @@ class ProjectionService:
                     fpl_df = fpl_df.merge(_xm_exp, on=['fixture_id', 'player_id'], how='left')
                 else:
                     fpl_df['expected_minutes'] = None
-                fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points', 'Bonus Points', 'def_con_pct', 'expected_minutes']].copy()
+                # Per-stat DIALLED projections. The FPL detail tiles used to read
+                # player_projections, which is written by the non-FPL pipeline
+                # and knows nothing about dials — so a dialled player's tiles
+                # disagreed with his points. Bruno Fernandes read xA 0.77 on the
+                # site against 0.55 in the panel (assist_share dialled 42%->30%),
+                # and because BAND dials scale every player-level stat, his goals
+                # / saves / key passes were all ~8% out too (xMins 81.4 -> 88.2).
+                # Carried from _fpl_frame, which is post-dial. George, 2026-08-05.
+                for _src, _dst in FPL_STAT_COLUMNS.items():
+                    if _src in _fpl_frame.columns:
+                        _stat = (
+                            _fpl_frame[['fixture_id', 'player_id', _src]]
+                            .drop_duplicates(['fixture_id', 'player_id'])
+                            .rename(columns={_src: _dst})
+                        )
+                        fpl_df = fpl_df.merge(_stat, on=['fixture_id', 'player_id'], how='left')
+                    else:
+                        fpl_df[_dst] = None
+                fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points', 'Bonus Points', 'def_con_pct', 'expected_minutes'] + list(FPL_STAT_COLUMNS.values())].copy()
                 # Stamp gameweek_id + team_id + opponent_id from the source
                 # fixtures table. gameweek_id makes the 6-GW horizon
                 # queryable; team_id / opponent_id let consumers filter
