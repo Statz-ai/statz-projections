@@ -28,9 +28,13 @@ logger = logging.getLogger("team_dials_repo")
 async def load_team_dials(competition_id: int) -> dict:
     """Return {team_id: (attack_pct, defense_pct)} for a competition.
 
-    Empty dict if no dials are set. Both values are ints in -50..+50;
-    zero is filtered out at write time so any value here is a real
-    override.
+    Empty dict if no dials are set. Zero is filtered out at write time, so
+    any value here is a real override.
+
+    Cast to FLOAT deliberately. The column is decimal, so the driver hands
+    back Decimal — and Decimal / int stays Decimal, which multiplied into a
+    pandas float column either raises or silently turns it to object dtype.
+    That is the same failure that killed the promoted-ratings path.
     """
     if not competition_id:
         return {}
@@ -49,7 +53,7 @@ async def load_team_dials(competition_id: int) -> dict:
                 (int(competition_id),),
             )
             rows = await cur.fetchall()
-        return {int(tid): (int(atk), int(dfn)) for tid, atk, dfn in rows}
+        return {int(tid): (float(atk), float(dfn)) for tid, atk, dfn in rows}
     finally:
         if conn and _db.pool:
             _db.pool.release(conn)
@@ -90,6 +94,6 @@ async def apply_team_dials_to_ratings(ratings, competition_id, teams, league_lab
             ratings.loc[mask, 'Attack'] = ratings.loc[mask, 'Attack'] * (1 + atk_pct / 100)
         if def_pct:
             ratings.loc[mask, 'Defense'] = ratings.loc[mask, 'Defense'] * (1 + def_pct / 100)
-        touched.append(f"{team_name}({atk_pct:+d}A/{def_pct:+d}D)")
+        touched.append(f"{team_name}({atk_pct:+.1f}A/{def_pct:+.1f}D)")
     if touched:
         logger.info(f"[{league_label}] team dials applied: {', '.join(touched)}")
