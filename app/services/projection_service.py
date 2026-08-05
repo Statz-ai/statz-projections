@@ -2582,10 +2582,16 @@ class ProjectionService:
                 try:
                     from app.repository.fpl_repo import cleanup_fpl_projections_async
                     _cl_gws = [int(g) for g in fpl_df['Gameweek'].dropna().unique().tolist()]
-                    _cl_keep = [int(p) for p in fpl_df['player_id'].dropna().unique().tolist()]
-                    _stale = await cleanup_fpl_projections_async(_cl_gws, _cl_keep)
+                    # (fixture, player) pairs, not player ids — a transferred
+                    # player is still "kept" but his OLD club's rows hang off
+                    # the old club's fixtures and no upsert ever touches them.
+                    _cl_pairs = [
+                        (int(f), int(p)) for f, p in
+                        fpl_df[['fixture_id', 'player_id']].dropna().itertuples(index=False, name=None)
+                    ]
+                    _stale = await cleanup_fpl_projections_async(_cl_gws, _cl_pairs)
                     if _stale:
-                        logger.info(f"[{league}] FPL: {_stale} stale rows removed for players no longer projected/allowed")
+                        logger.info(f"[{league}] FPL: {_stale} stale rows removed (not produced by this run)")
                 except Exception as _cl_err:
                     logger.warning(f"[{league}] FPL stale-row cleanup skipped: {_cl_err}")
             except Exception as e:

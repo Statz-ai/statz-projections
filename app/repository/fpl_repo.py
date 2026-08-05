@@ -98,26 +98,58 @@ async def insert_fpl_projections_async(data_list):
     return await execute_chunked(sql, values, label="[fpl_projections]")
 
 
-async def cleanup_fpl_projections_async(gameweek_ids, keep_player_ids):
-    """Membership semantics for the covered gameweeks: after the upsert,
-    delete rows for players NOT in this run's kept frame. The insert alone
-    can never REMOVE a player — one newly red-flagged (J.Timber's run-7 rows
-    survived his 'i' flag landing) or dropped from the pool keeps his
-    previous run's rows forever. Returns rows deleted."""
+async def cleanup_fpl_projections_async(gameweek_ids, keep_pairs):
+    """Membership semantics for the covered gameweeks: after the upsert, delete
+    every row this run did NOT produce. The insert can only add or update, so
+    anything it did not write survives forever.
+
+    keep_pairs: iterable of (fixture_id, player_id) the run actually wrote.
+
+    Keyed on the PAIR, not on player_id alone. Player-only membership missed a
+    transfer entirely: Elliot Anderson moved Forest -> Man City, the run
+    correctly wrote 19 Man City rows, and because he was still "kept" his 18
+    Forest rows stayed — he projected at both clubs at once, and would have
+    shown twice on the site. Lacroix was the same Palace -> Chelsea. The old
+    club's rows hang off the old club's FIXTURES, so no upsert ever touches
+    them. (2026-08-05, found the day the transfer backfill first moved anyone.)
+
+    Still covers the original case — a player dropped from the pool or newly
+    flagged contributes no pairs, so all his rows go (J.Timber kept run-7 rows
+    after his 'i' flag landed).
+
+    Chunked per gameweek to keep the row-constructor IN list to roughly a
+    squad-round in size rather than the whole horizon.
+    """
     gw_ids = [int(g) for g in gameweek_ids if g is not None]
-    keep = [int(p) for p in keep_player_ids if p is not None]
-    if not gw_ids or not keep:
+    pairs = {(int(f), int(p)) for f, p in keep_pairs if f is not None and p is not None}
+    if not gw_ids or not pairs:
         return 0
     conn = await _db.get_connection()
+    deleted = 0
     try:
         async with conn.cursor() as cur:
-            gw_ph = ",".join(["%s"] * len(gw_ids))
-            keep_ph = ",".join(["%s"] * len(keep))
-            await cur.execute(
-                f"DELETE FROM fpl_projections WHERE gameweek_id IN ({gw_ph}) AND player_id NOT IN ({keep_ph})",
-                tuple(gw_ids) + tuple(keep),
-            )
-            deleted = cur.rowcount
+            for gw in gw_ids:
+                # A fixture belongs to exactly one gameweek, so a pair from
+                # another gameweek can never appear in `existing` here — the
+                # global keep-set is safe to diff against per gameweek.
+                await cur.execute(
+                    "SELECT fixture_id, player_id FROM fpl_projections WHERE gameweek_id = %s",
+                    (gw,),
+                )
+                existing = {(int(f), int(p)) for f, p in await cur.fetchall()}
+                stale = existing - pairs
+                if not stale:
+                    continue
+                stale = list(stale)
+                for i in range(0, len(stale), 1000):
+                    chunk = stale[i:i + 1000]
+                    ph = ",".join(["(%s,%s)"] * len(chunk))
+                    await cur.execute(
+                        f"DELETE FROM fpl_projections WHERE gameweek_id = %s "
+                        f"AND (fixture_id, player_id) IN ({ph})",
+                        (gw,) + tuple(v for pair in chunk for v in pair),
+                    )
+                    deleted += cur.rowcount
         await conn.commit()
         return deleted
     finally:
