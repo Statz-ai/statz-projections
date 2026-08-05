@@ -47,11 +47,22 @@ BAND_MINUTES = {"none": 0.0, "short": 30.0, "long": 75.0, "full": 90.0}
 # within the 80+ minute band — so minutes explain only a little of it. Poisson
 # would understate the spread badly for the high-volume stats, which is where
 # the 30-attempt pass-completion gate lives.
+# Only the high-volume pass counts are overdispersed enough to model. The
+# defensive actions are LOW counts (a defender makes ~9 CBI, ~3 recoveries, ~2
+# tackles won a match), so Poisson is close enough and the absolute error is
+# small: at a mean of 9, measured dispersion 1.27 widens the spread from 3.0 to
+# 3.4, which is ~0.1 BPS once floored by the 1-per-3 divisor.
+#
+# cbi and recoveries previously sat at 2.0 — a guess with nothing behind it,
+# against a MEASURED 1.27 for CBIT. That drew them ~25% wider than reality,
+# which matters because bonus is a RANK: over-wide tails let a mediocre
+# defender roll a freak line and take a bonus place off a better one.
+#
+# Poisson also matches the DefCon threshold, which runs _TD_DISPERSION = 1.0 by
+# the same call — one spread model for the same actions. George, 2026-08-05.
 DISPERSION = {
     "passes": 4.15,
     "accurate_passes": 4.15,
-    "cbi": 2.0,
-    "recoveries": 2.0,
 }
 DEFAULT_DISPERSION = 1.0  # Poisson
 
