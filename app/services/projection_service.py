@@ -15,6 +15,7 @@ from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.repository.dream11_repo import insert_dream11_projections_async
 from app.data_loader import LeagueDataLoader
+from app.repository.points_adjustments_repo import apply_points_adjustments
 from app.services import unified_ratings
 from app.source_database import get_source_connection, release_source_connection
 
@@ -1309,6 +1310,12 @@ class ProjectionService:
             current_league_table = {
                 team: {'Points': points, 'Goals For': gf, 'Goals Against': ga, 'Goal Difference': gd} for
                 team, points, gf, ga, gd in current_standings.values}
+
+            # Manual points adjustments — a deduction announced before
+            # Sportmonks folds it into `points`. Skipped automatically once
+            # the standings already show it, so it cannot double-count.
+            current_league_table = await apply_points_adjustments(
+                current_league_table, standings, league_id, current_season_id, teams, league)
 
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
@@ -3428,6 +3435,12 @@ class ProjectionService:
                 team: {'Points': points, 'Goals For': gf, 'Goals Against': ga, 'Goal Difference': gd} for
                 team, points, gf, ga, gd in current_standings.values}
 
+            # Manual points adjustments — a deduction announced before
+            # Sportmonks folds it into `points`. Skipped automatically once
+            # the standings already show it, so it cannot double-count.
+            current_league_table = await apply_points_adjustments(
+                current_league_table, standings, league_id, current_season_id, teams, league)
+
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
             avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table,
@@ -4446,6 +4459,12 @@ class ProjectionService:
                 team: {'Points': points, 'Goals For': gf, 'Goals Against': ga, 'Goal Difference': gd} for
                 team, points, gf, ga, gd in current_standings.values}
 
+            # Manual points adjustments — a deduction announced before
+            # Sportmonks folds it into `points`. Skipped automatically once
+            # the standings already show it, so it cannot double-count.
+            current_league_table = await apply_points_adjustments(
+                current_league_table, standings, league_id, current_season_id, teams, league)
+
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
         # # **Team Projections**
@@ -5306,6 +5325,12 @@ class ProjectionService:
             current_league_table = {
                 team: {'Points': points, 'Goals For': gf, 'Goals Against': ga, 'Goal Difference': gd} for
                 team, points, gf, ga, gd in current_standings.values}
+
+            # Manual points adjustments — a deduction announced before
+            # Sportmonks folds it into `points`. Skipped automatically once
+            # the standings already show it, so it cannot double-count.
+            current_league_table = await apply_points_adjustments(
+                current_league_table, standings, league_id, current_season_id, teams, league)
 
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 

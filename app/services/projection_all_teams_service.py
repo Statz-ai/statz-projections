@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
+from app.repository.points_adjustments_repo import apply_points_adjustments
 from app.services import unified_ratings
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.services.international_projection_service import InternationalProjectionService
@@ -1074,6 +1075,11 @@ class ProjectionAllTeams:
 
                     logger.info(f"[{league}] Step: running season simulation (10000 sims)...")
                     _t = time.time()
+                    # Same adjustment as projection_service — this service is a
+                    # parallel copy of the pipeline and also writes the outrights.
+                    current_league_table = await apply_points_adjustments(
+                        current_league_table, standings, league_id, current_season_id, teams, league)
+
                     avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
                     logger.info(f"[{league}] Step: season simulation complete ({time.time()-_t:.1f}s)")
 
