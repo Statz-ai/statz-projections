@@ -72,25 +72,66 @@ PENS_COL = "Penalties Scored"
 ORDER_COL = "penalties_order"
 
 
-def cascade_shares(minutes_fracs):
-    """P(each listed taker takes the penalty), in designated order.
+def cascade_shares(takers):
+    """P(each listed taker takes the penalty).
 
-    `minutes_fracs` is xMins/90 per taker, already in order. Returns
-    (shares, residual) where shares has the same length as the input and
-    `residual` is the probability that none of them was on the pitch.
+    `takers` is a list of (rank, weight, minutes_frac):
+        rank    the tier. Players SHARING a rank share the duty.
+        weight  split within the tier (any positive scale; 60/40 or 6/4).
+                Ignored when a tier holds one player.
+        minutes_frac  xMins/90 — probability he is on the pitch.
 
-    These are true probabilities and are NOT renormalised — see the module
-    docstring. shares + residual == 1 by construction. An all-zero input
-    returns a residual of 1.0, which the caller must read as "no opinion",
-    not as "nobody takes penalties".
+    Returns (shares, residual), shares aligned to the input order, residual
+    the probability nobody listed was on. shares + residual == 1 exactly.
+    Not renormalised — see the module docstring.
+
+    Tiers cascade: a tier only takes the penalty when NO player in any
+    earlier tier is on the pitch. Within a tier the duty is split by weight
+    across whoever is actually on, which is why a 60/40 pair does not come
+    out at exactly 60/40 — when one is absent the other takes all of it.
+
+    An all-zero-minutes input returns residual 1.0, which the caller must
+    read as "no opinion", not "nobody takes penalties".
     """
-    remaining = 1.0
-    raw = []
-    for m in minutes_fracs:
-        m = min(max(float(m), 0.0), 1.0)
-        raw.append(remaining * m)
-        remaining *= (1.0 - m)
-    return raw, remaining
+    idx_by_rank = {}
+    for i, (rank, _w, _m) in enumerate(takers):
+        idx_by_rank.setdefault(rank, []).append(i)
+
+    shares = [0.0] * len(takers)
+    reached = 1.0   # P(no one in any earlier tier was on the pitch)
+
+    for rank in sorted(idx_by_rank):
+        members = idx_by_rank[rank]
+        ms = [min(max(float(takers[i][2]), 0.0), 1.0) for i in members]
+        ws = [max(float(takers[i][1] or 0.0), 0.0) for i in members]
+        # A tier whose weights are all zero (or unset) splits evenly — an
+        # admin who set a rank but no percentages means "these share it".
+        if sum(ws) <= 0:
+            ws = [1.0] * len(members)
+
+        # Enumerate which members of THIS tier are on the pitch. Tiers hold
+        # 1-3 players in practice, so 2^k is trivial and exact — no need to
+        # approximate the "both on" / "one on" cases separately.
+        for mask in range(1, 1 << len(members)):
+            present = [j for j in range(len(members)) if mask & (1 << j)]
+            p = 1.0
+            for j in range(len(members)):
+                p *= ms[j] if (mask & (1 << j)) else (1.0 - ms[j])
+            if p <= 0:
+                continue
+            wsum = sum(ws[j] for j in present)
+            if wsum <= 0:
+                continue
+            for j in present:
+                shares[members[j]] += reached * p * (ws[j] / wsum)
+
+        # Move to the next tier only in the worlds where nobody here was on.
+        none_on = 1.0
+        for m in ms:
+            none_on *= (1.0 - m)
+        reached *= none_on
+
+    return shares, reached
 
 
 def apply_penalty_order_shares(frame, order_by_pid, team_predictions):
@@ -122,10 +163,19 @@ def apply_penalty_order_shares(frame, order_by_pid, team_predictions):
     merged = frame.merge(tp, on=["fixture_id", "Team"], how="left")
     team_pens = pd.to_numeric(merged["_team_pens"], errors="coerce")
 
-    order = merged["player_id"].map(
-        lambda p: order_by_pid.get(int(p)) if pd.notna(p) else None
-    )
-    order = pd.to_numeric(order, errors="coerce")
+    # order_by_pid values are either a bare rank (FPL's penalties_order) or a
+    # (rank, weight) pair once an admin has split a tier. Both accepted so the
+    # loader can keep handing over FPL's raw column untouched.
+    def _rank_of(p):
+        v = order_by_pid.get(int(p)) if pd.notna(p) else None
+        return (v[0] if isinstance(v, (tuple, list)) else v)
+
+    def _weight_of(p):
+        v = order_by_pid.get(int(p)) if pd.notna(p) else None
+        return (v[1] if isinstance(v, (tuple, list)) and len(v) > 1 else None)
+
+    order = pd.to_numeric(merged["player_id"].map(_rank_of), errors="coerce")
+    weight = pd.to_numeric(merged["player_id"].map(_weight_of), errors="coerce")
     mins = pd.to_numeric(merged["xmin_bands"], errors="coerce").fillna(0.0)
 
     new_pens = pd.Series(np.nan, index=merged.index, dtype=float)
@@ -145,8 +195,15 @@ def apply_penalty_order_shares(frame, order_by_pid, team_predictions):
         tp_val = float(tp_val.iloc[0])
 
         listed = listed.assign(_ord=order.loc[listed.index]).sort_values("_ord")
-        fracs = (mins.loc[listed.index] / 90.0).tolist()
-        shares, residual = cascade_shares(fracs)
+        takers = [
+            (
+                float(order.loc[i]),
+                float(weight.loc[i]) if pd.notna(weight.loc[i]) else 0.0,
+                float(mins.loc[i]) / 90.0,
+            )
+            for i in listed.index
+        ]
+        shares, residual = cascade_shares(takers)
         if sum(shares) <= 0:
             # Every listed taker at zero minutes. No opinion — history stands.
             continue
