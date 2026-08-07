@@ -1787,11 +1787,17 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
             .reset_index(drop=True)
         )
 
-    elif stat == 'Expected Assists (xA)':
-        # xA is fractional like xG — the int cast truncated every per-match
-        # value (0.2, 0.4, ...) to ZERO, so xA shares were ~0 for everyone
-        # and the PL assists blend silently degenerated to assists-only
-        # since the feature shipped (found 2026-07-30).
+    elif stat in ('Expected Assists (xA)', 'Non-Penalty Expected Goals'):
+        # Fractional like xG — the int cast below truncates every per-match
+        # value (0.2, 0.4, ...) to ZERO. That is exactly how xA shares sat at
+        # ~0 for everyone and the PL assists blend silently degenerated to
+        # assists-only from the day it shipped (found 2026-07-30). npxG is the
+        # same shape and would fail the same way.
+        #
+        # Deliberately NOT given the xG missing-data guard above: an npxG of 0
+        # with shots > 0 is legitimate (a player whose only shot was a
+        # penalty), and npxG rows exist only where an xG row did, so the
+        # missing-data cases are already excluded by construction.
         player_stats['value'] = player_stats['value'].astype(float)
     else:
         player_stats['value'] = player_stats['value'].astype(int)
@@ -2155,6 +2161,47 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                             #    else:
                             #        predicted_stat = stat_prop * team_stat_values[i+5]
                             #        player_pred_stats[stat_list[i]] = predicted_stat.round(2)
+                        except:
+                            pass
+                    elif stat_list[stat] == 'Non-Penalty Goals':
+                        # Blend NPG with npxG, mirroring the Goals/xG blend
+                        # above. Without it NPG's share came from raw goals
+                        # alone while Goals blended with xG, so a player with
+                        # in-window xG but no in-window goals projected a
+                        # positive Goals share and a ZERO non-penalty share —
+                        # and his goals vanished entirely. 77 players, 3.1% of
+                        # all projected PL goals, on run 3758. Milner is the
+                        # purest case: his only goal in the sample WAS a
+                        # penalty, so his NPG history is honestly zero.
+                        #
+                        # npxG is synthetic (999005, xG - 0.79 x pens taken) —
+                        # Sportmonks ships none. See data_loader.PENALTY_XG.
+                        try:
+                            _d90 = {} if per90_collector is not None else None
+                            stat_prop_npg = get_player_weighted_average(
+                                player_stats, team_df, id, team_id, 'Non-Penalty Goals',
+                                stats_types, fixtures, comps, weight, games=50,
+                                per90_details=_d90,
+                            )
+                            _collect_per90(id, 'Non-Penalty Goals', stat_prop_npg, _d90)
+                            try:
+                                _d90 = {} if per90_collector is not None else None
+                                stat_prop_npxg = get_player_weighted_average(
+                                    player_stats, team_df, id, team_id,
+                                    'Non-Penalty Expected Goals', stats_types, fixtures,
+                                    comps, weight, games=50, per90_details=_d90,
+                                )
+                                _collect_per90(id, 'Non-Penalty Expected Goals',
+                                               stat_prop_npxg, _d90)
+                                # Same asymmetry as Goals/xG: a zero partner
+                                # means no usable sample, so fall back rather
+                                # than halving a real share.
+                                if stat_prop_npxg == 0:
+                                    stat_prop = stat_prop_npg
+                                else:
+                                    stat_prop = (stat_prop_npg + stat_prop_npxg) / 2
+                            except:
+                                stat_prop = stat_prop_npg
                         except:
                             pass
                     elif stat_list[stat] == 'Assists' and competition_id == 8:

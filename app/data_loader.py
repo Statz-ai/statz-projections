@@ -82,6 +82,16 @@ _PLAYER_CHUNK_SIZE = 500
 # below any real day and well above a partial write.
 FPL_SNAPSHOT_MIN_PLAYERS = 400
 
+# xG Sportmonks assigns to a penalty. MEASURED, not assumed: of 859
+# (player, fixture) rows holding exactly one penalty and exactly one shot — so
+# the xG is the penalty alone — 98.7% read 0.790. Confirms two things at once:
+# their xG INCLUDES penalties, and this is the price.
+#
+# 0.79 rather than the 0.78 general football figure precisely because we
+# subtract it from Sportmonks' own xG; at 0.78 a penalty-only appearance leaves
+# 0.01 npxG behind, which is pure noise in a share denominator.
+PENALTY_XG = 0.79
+
 
 class LeagueDataLoader:
     """Loads scoped data for projecting ONE competition.
@@ -189,6 +199,7 @@ class LeagueDataLoader:
             # a ~0 share. Must come AFTER the overlay: FPL keeps precedence on PL.
             await self._derive_cbit_from_components(conn)
             await self._derive_non_penalty_goals(conn)
+            await self._derive_non_penalty_xg(conn)
             self._load_local_files()
             self._loaded = True
             logger.info(
@@ -1320,6 +1331,157 @@ class LeagueDataLoader:
         logger.info(
             "[NPG derive] player rows added %d, team rows added %d", n_player, n_team
         )
+
+    async def _derive_non_penalty_xg(self, conn) -> None:
+        """Build Non-Penalty Expected Goals (999005) = xG - 0.79 x pens taken.
+
+        Why this exists
+        ---------------
+        `Goals` blends 50/50 with xG at assembly; `Non-Penalty Goals` had no
+        expected-goals partner, so its share came from raw NPG alone. A player
+        with in-window xG but no in-window goals therefore projected a positive
+        Goals share and a ZERO non-penalty share, and his goals disappeared
+        from the projection: 77 players, 1,276 rows, 3.1% of all projected PL
+        goals on run 3758. Milner is the purest case — his only goal in the
+        sample WAS a penalty, so his NPG history is honestly zero.
+
+        Sportmonks ships no npxG (stat 7943 exists but holds zero rows), so it
+        is derived. Their xG DOES include penalties and prices one at exactly
+        0.79 — measured, not assumed: of 859 (player, fixture) rows with one
+        penalty and exactly one shot, so the xG is the penalty alone, 98.7%
+        read 0.790. 0.79 rather than the 0.78 general figure precisely because
+        we subtract from Sportmonks' own number; at 0.78 a penalty-only
+        appearance leaves 0.01 behind, pure noise in a share denominator.
+
+        Penalties TAKEN, not scored: a missed penalty still carries its xG.
+
+        Team rows come from the DB over ALL players, not self.player_stats,
+        for the same reason _npg_team_totals_from_db does — that frame is
+        scoped to the run's players, so summing it would understate the team
+        and inflate every share.
+        """
+        if self.player_stats is None or self.player_stats.empty:
+            return
+        if self.team_stats is None:
+            return
+
+        def _sid(name):
+            m = self.stats_types[self.stats_types["name"] == name]
+            return int(m["id"].iloc[0]) if not m.empty else None
+
+        npxg_id = _sid("Non-Penalty Expected Goals")
+        xg_id = _sid("Expected Goals (xG)")
+        scored_id = _sid("Penalties Scored")
+        missed_id = _sid("Penalties Missed")
+        if npxg_id is None or xg_id is None:
+            logger.warning("[npxG derive] missing stats_types — skipped")
+            return
+
+        ps = self.player_stats
+        ps["value"] = pd.to_numeric(ps["value"], errors="coerce")
+
+        xg = ps[ps["stats_type_id"] == xg_id][
+            ["player_id", "fixture_id", "team_id", "value"]
+        ].rename(columns={"value": "xg"})
+        if xg.empty:
+            return
+
+        pen_ids = [i for i in (scored_id, missed_id) if i is not None]
+        if pen_ids:
+            pens = (ps[ps["stats_type_id"].isin(pen_ids)]
+                    .groupby(["player_id", "fixture_id"], as_index=False)["value"].sum()
+                    .rename(columns={"value": "taken"}))
+            merged = xg.merge(pens, on=["player_id", "fixture_id"], how="left")
+        else:
+            merged = xg.assign(taken=0.0)
+        merged["taken"] = merged["taken"].fillna(0.0)
+        merged["npxg"] = (
+            merged["xg"] - PENALTY_XG * merged["taken"]
+        ).clip(lower=0)
+
+        have = set(map(tuple, ps.loc[
+            ps["stats_type_id"] == npxg_id, ["player_id", "fixture_id"]
+        ].values))
+        if have:
+            merged = merged[~merged.apply(
+                lambda r: (r["player_id"], r["fixture_id"]) in have, axis=1
+            )]
+
+        n_player = 0
+        if not merged.empty:
+            self.player_stats = pd.concat([ps, pd.DataFrame({
+                "player_id": merged["player_id"].astype("int64"),
+                "fixture_id": merged["fixture_id"].astype("int64"),
+                "team_id": merged["team_id"].astype("int64"),
+                "stats_type_id": npxg_id,
+                "value": merged["npxg"].astype(float),
+            })], ignore_index=True)
+            ps = self.player_stats
+            n_player = len(merged)
+
+        # ---- team totals, from the DB over ALL players ----
+        n_team = 0
+        fixture_ids = sorted({int(x) for x in ps["fixture_id"].dropna().unique()})
+        if fixture_ids:
+            totals = await self._npxg_team_totals_from_db(
+                conn, fixture_ids, xg_id, pen_ids
+            )
+            if totals is not None and not totals.empty:
+                ts = self.team_stats
+                keys = set(map(tuple, totals[["fixture_id", "team_id"]].astype("int64").values))
+                if not ts.empty:
+                    _drop = (ts["stats_type_id"] == npxg_id) & pd.Series(
+                        [(int(f), int(t)) in keys if pd.notna(f) and pd.notna(t) else False
+                         for f, t in zip(ts["fixture_id"], ts["team_id"])],
+                        index=ts.index,
+                    )
+                    if _drop.any():
+                        ts = ts[~_drop]
+                self.team_stats = pd.concat([ts, pd.DataFrame({
+                    "fixture_id": totals["fixture_id"].astype("int64"),
+                    "team_id": totals["team_id"].astype("int64"),
+                    "stats_type_id": npxg_id,
+                    "value": totals["value"].astype(float),
+                })], ignore_index=True)
+                n_team = len(totals)
+
+        logger.info(
+            "[npxG derive] player rows added %d, team rows added %d", n_player, n_team
+        )
+
+    async def _npxg_team_totals_from_db(self, conn, fixture_ids, xg_id, pen_ids):
+        """Team Non-Penalty xG per (fixture, team), aggregated in SQL."""
+        import pandas as pd
+        want = [xg_id] + list(pen_ids)
+        rows = []
+        for i in range(0, len(fixture_ids), 1500):
+            chunk = fixture_ids[i:i + 1500]
+            fph = ",".join(["%s"] * len(chunk))
+            sph = ",".join(["%s"] * len(want))
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""SELECT fixture_id, team_id, stats_type_id, SUM(value)
+                          FROM fixture_player_stats
+                         WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
+                         GROUP BY fixture_id, team_id, stats_type_id""",
+                    tuple(want) + tuple(chunk),
+                )
+                rows.extend(await cur.fetchall())
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["fixture_id", "team_id", "stats_type_id", "value"])
+        df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
+        x = df[df["stats_type_id"] == xg_id].groupby(
+            ["fixture_id", "team_id"], as_index=False)["value"].sum()
+        if not pen_ids:
+            return x
+        p = (df[df["stats_type_id"].isin(pen_ids)]
+             .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+             .rename(columns={"value": "taken"}))
+        out = x.merge(p, on=["fixture_id", "team_id"], how="left")
+        out["taken"] = out["taken"].fillna(0.0)
+        out["value"] = (out["value"] - PENALTY_XG * out["taken"]).clip(lower=0)
+        return out[["fixture_id", "team_id", "value"]]
 
     async def _npg_team_totals_from_db(self, conn, fixture_ids, goals_id, pens_id):
         """Team Non-Penalty Goals per (fixture, team), aggregated in SQL.

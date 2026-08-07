@@ -108,6 +108,11 @@ TEAM_STAT_NAMES = (
     # share. Sportmonks publishes no team row for it, so the loader derives one
     # by summing every player's; without it the share collapses to zero.
     "Penalties Scored",
+    # Non-Penalty Expected Goals (999005, synthetic: xG - 0.79 x pens taken).
+    # The partner NPG blends with, exactly as Goals blends with xG. Needs a
+    # TEAM row because it is the share denominator — without one the npxG half
+    # of the blend collapses to zero and we are back to raw-NPG shares.
+    "Non-Penalty Expected Goals",
 )
 
 # Stats queried from fixture_player_stats.
@@ -178,6 +183,10 @@ PLAYER_STAT_NAMES = (
     "Non-Penalty Goals",
     "Penalties Scored",
     "Penalties Missed",
+    # npxG (999005) + its input. xG is already loaded above for the Goals
+    # blend; Penalties Missed matters because a MISSED penalty still carries
+    # its xG, so the derive subtracts penalties TAKEN, not scored.
+    "Non-Penalty Expected Goals",
     # BPS static-rate stats (fpl_static_rates.py). Player traits rated per-90
     # from history rather than projected team-down, so they need PLAYER rows
     # only — deliberately absent from TEAM_STAT_NAMES.
