@@ -1029,14 +1029,27 @@ class LeagueDataLoader:
             SELECT m.player_id, m.fpl_id, m.fpl_code, m.fpl_element_type,
                    m.fpl_first_name, m.fpl_second_name, m.fpl_web_name,
                    ftm.team_id AS fpl_club_team_id,
-                   -- FPL's designated penalty order (1, 2, 3...), NULL for
-                   -- most players. Drives the penalty-taker cascade in
-                   -- fpl_penalties. Read from the SAME snapshot row that
-                   -- gates membership, so the order can never be staler than
-                   -- the squad it belongs to. Joined rather than sub-selected
-                   -- for that reason; (player_id, snapshot_date) is unique so
-                   -- this cannot fan out rows.
-                   s.penalties_order
+                   -- Penalty order driving the cascade in fpl_penalties.
+                   --
+                   -- FPL's own `penalties_order` is the default, read from the
+                   -- SAME snapshot row that gates membership so it can never
+                   -- be staler than the squad it belongs to. Joined rather
+                   -- than sub-selected for that reason; (player_id,
+                   -- snapshot_date) is unique so it cannot fan out rows.
+                   --
+                   -- An admin override replaces it ALL-OR-NOTHING per club: if
+                   -- the club has any fpl_penalty_orders row, FPL's list for
+                   -- that club is discarded outright, including for players
+                   -- the admin did not list. Mixing the two would leave FPL's
+                   -- rank 1 beside an admin rank 1 with no way to order them.
+                   CASE WHEN ovr_club.team_id IS NOT NULL
+                        THEN ovr.penalty_rank
+                        ELSE s.penalties_order
+                   END AS penalties_order,
+                   CASE WHEN ovr_club.team_id IS NOT NULL
+                        THEN ovr.weight
+                        ELSE NULL
+                   END AS penalty_weight
             FROM fpl_player_mappings m
             LEFT JOIN fpl_team_mappings ftm ON ftm.fpl_id = m.fpl_team_id
             JOIN fpl_player_snapshots s
@@ -1048,6 +1061,13 @@ class LeagueDataLoader:
                     ORDER BY snapshot_date DESC
                     LIMIT 1
                 )
+            LEFT JOIN fpl_penalty_orders ovr ON ovr.player_id = m.player_id
+            -- Which clubs have an override at all. Keyed on the SPORTMONKS
+            -- team id (ftm.team_id), the same id the override rows store, so
+            -- a club is matched by identity rather than by FPL's own id.
+            LEFT JOIN (
+                SELECT DISTINCT team_id FROM fpl_penalty_orders
+            ) ovr_club ON ovr_club.team_id = ftm.team_id
             """,
             (FPL_SNAPSHOT_MIN_PLAYERS,),
         )

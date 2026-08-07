@@ -18,6 +18,10 @@ import app.database as _db
 
 logger = logging.getLogger("fpl_recalc")
 
+# Mirrors data_loader.FPL_SNAPSHOT_MIN_PLAYERS — a snapshot date is only a
+# complete bootstrap above this many distinct players.
+FPL_SNAPSHOT_MIN_PLAYERS = 400
+
 # Frame columns the scoring functions consume (get_fpl_points +
 # bonus_points_score). Serialized per row; missing columns default 0.
 BUNDLE_COLS = [
@@ -133,6 +137,59 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
     affected = await execute_chunked(sql, rows, label="[fpl_assembly_bundles]")
     logger.info(f"[fpl_assembly_bundles] snapshotted {len(rows)} rows")
     return affected
+
+
+async def load_penalty_orders():
+    """{player_id: (rank, weight)} for every designated penalty taker.
+
+    Mirrors the resolution in data_loader's fpl_player_mappings query — admin
+    overrides replace FPL's list ALL-OR-NOTHING per club — so that a recalc and
+    a full run agree on who takes penalties. If you change the rule in one
+    place, change it in the other; the two are deliberately kept identical
+    rather than abstracted, because the loader needs it inline in a much larger
+    SELECT.
+
+    Weight is NULL unless an admin has split a tier: FPL never shares a rank.
+    """
+    conn = await get_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT m.player_id,
+                       CASE WHEN oc.team_id IS NOT NULL
+                            THEN o.penalty_rank ELSE s.penalties_order END AS pen_rank,
+                       CASE WHEN oc.team_id IS NOT NULL
+                            THEN o.weight ELSE NULL END AS pen_weight
+                FROM fpl_player_mappings m
+                LEFT JOIN fpl_team_mappings ftm ON ftm.fpl_id = m.fpl_team_id
+                JOIN fpl_player_snapshots s
+                  ON s.player_id = m.player_id
+                 AND s.snapshot_date = (
+                        SELECT snapshot_date FROM fpl_player_snapshots
+                        GROUP BY snapshot_date
+                        HAVING COUNT(DISTINCT player_id) >= %s
+                        ORDER BY snapshot_date DESC
+                        LIMIT 1
+                    )
+                LEFT JOIN fpl_penalty_orders o ON o.player_id = m.player_id
+                LEFT JOIN (
+                    SELECT DISTINCT team_id FROM fpl_penalty_orders
+                ) oc ON oc.team_id = ftm.team_id
+                """,
+                (FPL_SNAPSHOT_MIN_PLAYERS,),
+            )
+            out = {}
+            for pid, rank, weight in await cur.fetchall():
+                if rank is None:
+                    continue
+                out[int(pid)] = (
+                    int(rank), None if weight is None else float(weight)
+                )
+    finally:
+        if _db.pool:
+            _db.pool.release(conn)
+    return out
 
 
 async def load_bundles_for_players(player_ids):

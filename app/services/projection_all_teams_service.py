@@ -1667,8 +1667,16 @@ class ProjectionAllTeams:
                                     if _fm is not None and 'penalties_order' in getattr(_fm, 'columns', []):
                                         for _r in _fm.itertuples(index=False):
                                             _o = getattr(_r, 'penalties_order', None)
-                                            if _o is not None and not pd.isna(_o):
-                                                _pen_map[int(_r.player_id)] = int(_o)
+                                            if _o is None or pd.isna(_o):
+                                                continue
+                                            # (rank, weight). Weight is only ever set by an admin
+                                            # override; FPL never shares a rank, so a NULL weight
+                                            # just means "this tier holds one player".
+                                            _w = getattr(_r, 'penalty_weight', None)
+                                            _pen_map[int(_r.player_id)] = (
+                                                int(_o),
+                                                None if (_w is None or pd.isna(_w)) else float(_w),
+                                            )
                                     if _pen_map:
                                         _fpl_frame = apply_penalty_order_shares(
                                             _fpl_frame, _pen_map, team_projections)

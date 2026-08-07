@@ -148,6 +148,39 @@ async def recalc_fpl_players(player_ids) -> dict:
             applied += 1
 
     frame = frame.reset_index(drop=True)
+
+    # Penalty-taker cascade, re-derived here rather than trusted from the
+    # bundle. It depends on xmin_bands, which the dials above may just have
+    # moved, and on the admin's penalty order, which may have changed since the
+    # run. Runs AFTER the dial loop for the first reason and after
+    # reset_index because the cascade groups by position.
+    #
+    # Bonus does NOT refresh here (see the note below) — and bonus is where a
+    # penalty reassignment bites hardest, since a penalty is 12 BPS flat
+    # against 12/18/24 by position. Points do move: duty carries ~4-5 points
+    # per penalty goal with it. So the panel shows the points effect instantly
+    # and the bonus effect at the next full run, exactly like every other dial.
+    try:
+        from app.repository.fpl_recalc_repo import load_penalty_orders
+        from app.services.fpl_penalties import apply_penalty_order_shares
+        _pen_orders = await load_penalty_orders()
+        if _pen_orders and team_stats:
+            _tp_rows = [
+                {'fixture_id': int(fid), 'Team': tname, **{
+                    k: v for k, v in stats.items() if not isinstance(v, (list, dict))
+                }}
+                for fid, teams in team_stats.items()
+                for tname, stats in (teams or {}).items()
+            ]
+            if _tp_rows:
+                frame = apply_penalty_order_shares(
+                    frame, _pen_orders, pd.DataFrame(_tp_rows)
+                )
+    except Exception as _pen_err:
+        # Non-fatal: the bundle's stored penalty split stands, which is the
+        # last full run's answer rather than a broken one.
+        logger.warning(f"[fpl_recalc] penalty order shares skipped: {_pen_err}")
+
     pts = get_fpl_points(frame, score_preds, FPL_POINTS_GK, FPL_POINTS_DEF, FPL_POINTS_MID, FPL_POINTS_FWD)
     # Bonus is NOT recomputed here (George, 2026-08-04). It is a RANK, so
     # changing one player forces re-simulating every fixture he appears in —
