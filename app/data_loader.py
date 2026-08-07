@@ -1450,71 +1450,112 @@ class LeagueDataLoader:
         )
 
     async def _npxg_team_totals_from_db(self, conn, fixture_ids, xg_id, pen_ids):
-        """Team Non-Penalty xG per (fixture, team), aggregated in SQL."""
+        """Team Non-Penalty xG per (fixture, team) = TEAM xG row - 0.79 x pens.
+
+        The base comes from fixture_TEAM_stats, not from summing players — see
+        _npg_team_totals_from_db for why that distinction matters. It barely
+        moves xG (team row 1120.4 vs player sum 1124.4 over PL 25/26, -0.36%),
+        but the two totals are built identically so the pair cannot drift.
+
+        Penalties still come from the player table: every penalty is credited
+        to a player, so there is no own-goal analogue to miss.
+        """
         import pandas as pd
-        want = [xg_id] + list(pen_ids)
-        rows = []
+        team_rows, pen_rows = [], []
         for i in range(0, len(fixture_ids), 1500):
             chunk = fixture_ids[i:i + 1500]
             fph = ",".join(["%s"] * len(chunk))
-            sph = ",".join(["%s"] * len(want))
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"""SELECT fixture_id, team_id, stats_type_id, SUM(value)
-                          FROM fixture_player_stats
-                         WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
-                         GROUP BY fixture_id, team_id, stats_type_id""",
-                    tuple(want) + tuple(chunk),
+                    f"""SELECT fixture_id, team_id, SUM(value)
+                          FROM fixture_team_stats
+                         WHERE stats_type_id = %s AND fixture_id IN ({fph})
+                         GROUP BY fixture_id, team_id""",
+                    (xg_id,) + tuple(chunk),
                 )
-                rows.extend(await cur.fetchall())
-        if not rows:
+                team_rows.extend(await cur.fetchall())
+                if pen_ids:
+                    sph = ",".join(["%s"] * len(pen_ids))
+                    await cur.execute(
+                        f"""SELECT fixture_id, team_id, SUM(value)
+                              FROM fixture_player_stats
+                             WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
+                             GROUP BY fixture_id, team_id""",
+                        tuple(pen_ids) + tuple(chunk),
+                    )
+                    pen_rows.extend(await cur.fetchall())
+        if not team_rows:
             return None
-        df = pd.DataFrame(rows, columns=["fixture_id", "team_id", "stats_type_id", "value"])
-        df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
-        x = df[df["stats_type_id"] == xg_id].groupby(
-            ["fixture_id", "team_id"], as_index=False)["value"].sum()
-        if not pen_ids:
+        x = pd.DataFrame(team_rows, columns=["fixture_id", "team_id", "value"])
+        x["value"] = pd.to_numeric(x["value"], errors="coerce").fillna(0.0)
+        if not pen_rows:
             return x
-        p = (df[df["stats_type_id"].isin(pen_ids)]
-             .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
-             .rename(columns={"value": "taken"}))
+        p = pd.DataFrame(pen_rows, columns=["fixture_id", "team_id", "taken"])
+        p["taken"] = pd.to_numeric(p["taken"], errors="coerce").fillna(0.0)
         out = x.merge(p, on=["fixture_id", "team_id"], how="left")
         out["taken"] = out["taken"].fillna(0.0)
         out["value"] = (out["value"] - PENALTY_XG * out["taken"]).clip(lower=0)
         return out[["fixture_id", "team_id", "value"]]
 
     async def _npg_team_totals_from_db(self, conn, fixture_ids, goals_id, pens_id):
-        """Team Non-Penalty Goals per (fixture, team), aggregated in SQL.
+        """Team Non-Penalty Goals per (fixture, team) = TEAM Goals row - pens.
 
-        Chunked at 1,500 fixtures, mirroring _team_totals_from_db.
+        The goals base MUST come from fixture_TEAM_stats, not from summing
+        players. OWN GOALS count for the team but belong to no player of it, so
+        the player sum is short: PL 25/26 reads 1045 team goals against 1011
+        player goals, a 3.25% gap.
+
+        That matters because the ordinary `Goals` share divides by the TEAM row.
+        Players' goal shares therefore sum to ~96.75% and own goals are
+        allocated to nobody, which is correct. Building the NPG denominator
+        from the player sum instead made NPG shares sum to ~100%, and since
+        both are multiplied by a projected team total that DOES include own
+        goals, every player's non-penalty goals came out ~3.4% high. George
+        caught it by asking whether the NPG share really is the goal share with
+        penalties removed from both ends — it now is.
+
+        Penalties still come from the player table: every penalty is credited
+        to a player, so there is no own-goal analogue on that side.
+
+        A team-fixture with no team Goals row (nobody scored — Sportmonks
+        stores no zero) simply produces no row, exactly as the player-sum
+        version did, and the share code drops those fixtures from the window.
         """
         import pandas as pd
-        want = [i for i in (goals_id, pens_id) if i is not None]
-        rows = []
+        team_rows, pen_rows = [], []
         for i in range(0, len(fixture_ids), 1500):
             chunk = fixture_ids[i:i + 1500]
             fph = ",".join(["%s"] * len(chunk))
-            sph = ",".join(["%s"] * len(want))
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"""SELECT fixture_id, team_id, stats_type_id, SUM(value)
-                          FROM fixture_player_stats
-                         WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
-                         GROUP BY fixture_id, team_id, stats_type_id""",
-                    tuple(want) + tuple(chunk),
+                    f"""SELECT fixture_id, team_id, SUM(value)
+                          FROM fixture_team_stats
+                         WHERE stats_type_id = %s AND fixture_id IN ({fph})
+                         GROUP BY fixture_id, team_id""",
+                    (goals_id,) + tuple(chunk),
                 )
-                rows.extend(await cur.fetchall())
-        if not rows:
+                team_rows.extend(await cur.fetchall())
+                if pens_id is not None:
+                    await cur.execute(
+                        f"""SELECT fixture_id, team_id, SUM(value)
+                              FROM fixture_player_stats
+                             WHERE stats_type_id = %s AND fixture_id IN ({fph})
+                             GROUP BY fixture_id, team_id""",
+                        (pens_id,) + tuple(chunk),
+                    )
+                    pen_rows.extend(await cur.fetchall())
+        if not team_rows:
             return None
-        df = pd.DataFrame(rows, columns=["fixture_id", "team_id", "stats_type_id", "value"])
-        df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
-        g = df[df["stats_type_id"] == goals_id].groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+        g = pd.DataFrame(team_rows, columns=["fixture_id", "team_id", "value"])
+        g["value"] = pd.to_numeric(g["value"], errors="coerce").fillna(0.0)
         if pens_id is None:
             return g
-        p = (df[df["stats_type_id"] == pens_id]
-             .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
-             .rename(columns={"value": "pens"}))
-        out = g.merge(p, on=["fixture_id", "team_id"], how="left")
+        if pen_rows:
+            p = pd.DataFrame(pen_rows, columns=["fixture_id", "team_id", "pens"])
+            p["pens"] = pd.to_numeric(p["pens"], errors="coerce").fillna(0.0)
+            out = g.merge(p, on=["fixture_id", "team_id"], how="left")
+        else:
+            out = g.assign(pens=0.0)
         out["pens"] = out["pens"].fillna(0.0)
         out["value"] = (out["value"] - out["pens"]).clip(lower=0)
         # `pens` retained: the caller writes team-level Penalties Scored from it.
