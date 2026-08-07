@@ -47,16 +47,15 @@ logger = logging.getLogger("projection")
 # tiles can read DIALLED values. frame column -> DB column. Team-level tiles
 # (clean sheet %, xGC) come from fixture_projections and are not affected by a
 # player dial, so they stay where they are.
-# Penalty split constants, measured over PL 2024/25 + 2025/26 (175 penalties
-# taken, 146 scored, 29 missed):
-#   - penalties are 6.76% of all goals scored
-#   - converted at 83.4%
-# George reviewed both against his recollection of the long-run figures (78%
-# conversion, 8-9% share) and chose the measured pair, 2026-08-07. Kept as
-# named constants precisely because two seasons is a thin sample and these
-# should be revisited once more history is available.
+# Share of a team's goals that come from the spot, measured over PL 2024/25 +
+# 2025/26 (175 penalties taken, 146 scored, 29 missed). George reviewed it
+# against his recollection of the long-run figure (8-9%) and chose the measured
+# value, 2026-08-07. Named precisely because two seasons is a thin sample and
+# it should be revisited once more history is available.
+#
+# The matching conversion rate (83.4%) lives in fpl_bps.PENALTY_CONVERSION_RATE
+# — it is a scoring constant and is only needed on the points/BPS side.
 PENALTY_GOAL_SHARE = 0.0676
-PENALTY_CONVERSION_RATE = 0.834
 
 FPL_STAT_COLUMNS = {
     'Goals': 'proj_goals',

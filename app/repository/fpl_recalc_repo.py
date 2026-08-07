@@ -42,6 +42,13 @@ BUNDLE_COLS = [
     # recalc path would fall back to the Averages and score bonus off different
     # numbers than the run did.
     'Tackles Won', 'Ball Recovery', 'Clearances Blocks Interceptions (FPL)',
+    # Penalty split. Both are needed: the points path scores non-penalty and
+    # penalty goals at the same 4 points but charges misses, and the bonus
+    # simulator scores penalties at 12 BPS flat instead of 12/18/24. Absent
+    # from the bundle, recalc falls back to the undivided 'Goals' and quietly
+    # awards every taker his position rate on spot-kicks — so a recalc would
+    # disagree with the run that produced it.
+    'Non-Penalty Goals', 'Penalties Scored',
     'xmin_p_play', 'xmin_p60', 'xmin_p90', 'xmin_bands', 'xmin_start_len',
 ] + [
     # Per-90 companions (xminutes.PER90_SUFFIX). The bonus simulator samples a
@@ -56,6 +63,7 @@ BUNDLE_COLS = [
         'Clearances Average', 'Blocked Shots Average', 'Ball Recovery Average',
         'Tackles Won Average',
         'Tackles Won', 'Ball Recovery', 'Clearances Blocks Interceptions (FPL)',
+        'Non-Penalty Goals', 'Penalties Scored',
     )
 ]
 

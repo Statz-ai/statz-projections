@@ -168,6 +168,19 @@ def simulate_fixture(players, team_goals_against, n_samples=DEFAULT_SAMPLES, see
             drawn[stat] = _draw_counts(
                 rng, rate * scale, n, DISPERSION.get(stat, DEFAULT_DISPERSION)
             )
+        # Penalties: draw ATTEMPTS, then split into scored/missed on the
+        # conversion rate. Drawing the two independently would let a player
+        # miss a penalty he never took, and would decouple a miss (-6 BPS)
+        # from the goal (+12) it replaces.
+        pen_rate = float(p.get("pens_taken", 0.0) or 0.0)
+        if pen_rate > 0:
+            taken = _draw_counts(rng, pen_rate * scale, n)
+            drawn["pen_goals"] = rng.binomial(taken, fpl_bps.PENALTY_CONVERSION_RATE)
+            drawn["pens_missed"] = taken - drawn["pen_goals"]
+        else:
+            drawn["pen_goals"] = np.zeros(n, dtype=int)
+            drawn["pens_missed"] = np.zeros(n, dtype=int)
+
         # Accurate passes are a binomial on the drawn attempts, not their own
         # independent draw — otherwise completion% could exceed 100.
         comp = float(np.clip(p.get("pass_completion", 0.8), 0.0, 1.0))
@@ -202,6 +215,12 @@ def simulate_fixture(players, team_goals_against, n_samples=DEFAULT_SAMPLES, see
 # ---------------------------------------------------------------------------
 #  Adapter: FPL scoring frame -> simulator inputs
 # ---------------------------------------------------------------------------
+
+# Penalty split columns. "Goals" stays in FRAME_TO_SIM as the fallback for
+# frames produced before the split existed; when NPG_COL is present it is
+# overridden in simulate_bonus_for_frame.
+NPG_COL = "Non-Penalty Goals"
+PENS_COL = "Penalties Scored"
 
 # frame column -> simulator stat key. Values are read from the "{col} per90"
 # companion (xminutes.PER90_SUFFIX), NOT the column itself: the frame column is
@@ -324,6 +343,21 @@ def simulate_bonus_for_frame(frame, score_preds, n_samples=DEFAULT_SAMPLES):
             }
             for col, key in FRAME_TO_SIM.items():
                 p[key] = _rate(row, col)
+            # "goals" means NON-PENALTY goals whenever the projection carries
+            # the split, with penalties drawn separately above — they are worth
+            # 12 BPS flat rather than 12/18/24 by position. Without the split
+            # columns we fall back to the old undivided "Goals", which
+            # overstates a taker's BPS exactly as it did before 2026-08-07.
+            if (NPG_COL + PER90) in row:
+                p["goals"] = _rate(row, NPG_COL)
+                _pens_scored = _rate(row, PENS_COL)
+                p["pens_taken"] = (
+                    _pens_scored / fpl_bps.PENALTY_CONVERSION_RATE
+                    if _pens_scored > 0 else 0.0
+                )
+            else:
+                p["pens_taken"] = 0.0
+
             _cbi_proj = _rate(row, CBI_PROJECTED) if (CBI_PROJECTED + PER90) in row else 0.0
             p["cbi"] = _cbi_proj if _cbi_proj > 0 else sum(_rate(row, c) for c in CBI_PARTS)
             passes = p.get("passes", 0.0)

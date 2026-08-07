@@ -4,6 +4,8 @@ import pickle
 import re
 from typing import Any
 
+from app.services.fpl_bps import PENALTY_CONVERSION_RATE
+
 _PROJ_LOGGER = logging.getLogger("projection")
 
 # --- form decay ------------------------------------------------------------
@@ -150,6 +152,11 @@ def get_trainable_stat_list():
     """
     return get_stat_list() + list(PL_ONLY_STATS)
 
+
+
+# A penalty MISS is -2 POINTS but -6 BPS. Different scales, both real; the BPS
+# side (and the conversion rate) lives in fpl_bps.py.
+PENALTY_MISS_POINTS = -2
 
 TEAM_NAME_FIXES = {
     "Milan": "AC Milan",
@@ -2469,7 +2476,28 @@ def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_d
             fpl_points_df['PTS'].append(0)
             continue
         team = pl_projections['Team'][i]
-        goal_points = pl_projections['Goals'][i] * fpl_points_dict['Goals']
+        # Goals scored from the penalty split when it is present. FPL pays the
+        # SAME points for a penalty as for any other goal, so a player's total
+        # is unchanged unless his penalty share differs from his goal share —
+        # which is the entire point: open-play threat and penalty duty become
+        # separately dialable. (BPS is a different matter: a penalty is 12 flat
+        # there against 12/18/24 by position, handled in fpl_bps.)
+        #
+        # Falls back to the combined 'Goals' column when the split is absent
+        # (non-PL, or a frame built before the split shipped). Never adds the
+        # two together — that would double-count every goal.
+        _npg = pl_projections['Non-Penalty Goals'][i] if 'Non-Penalty Goals' in pl_projections.columns else None
+        _peng = pl_projections['Penalties Scored'][i] if 'Penalties Scored' in pl_projections.columns else None
+        if _npg is not None and not pd.isna(_npg):
+            _peng = 0.0 if (_peng is None or pd.isna(_peng)) else float(_peng)
+            goal_points = (float(_npg) + _peng) * fpl_points_dict['Goals']
+            # Penalty MISSES: -2 points, and something we did not project at
+            # all before. attempts = scored / conversion, so misses are the
+            # complement. Measured over PL 24/25 + 25/26: 83.4% conversion.
+            _pen_misses = (_peng / PENALTY_CONVERSION_RATE) * (1.0 - PENALTY_CONVERSION_RATE) if _peng > 0 else 0.0
+            goal_points += _pen_misses * PENALTY_MISS_POINTS
+        else:
+            goal_points = pl_projections['Goals'][i] * fpl_points_dict['Goals']
         assists = pl_projections['Assists'][i] * fpl_points_dict['Assists']
         yellow_cards = pl_projections['Yellow Cards'][i] * fpl_points_dict['Yellow Card']
         saves = pl_projections['Saves'][i]

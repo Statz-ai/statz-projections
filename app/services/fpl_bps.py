@@ -22,7 +22,7 @@ GK, DEF, MID, FWD = 1, 2, 3, 4
 APPEARANCE_SHORT = 3          # played 1-60 minutes
 APPEARANCE_LONG = 6           # played over 60 minutes
 GOAL = {GK: 12, DEF: 12, MID: 18, FWD: 24}   # non-penalty
-GOAL_FROM_PENALTY = 12        # flat, all positions — PARKED (see spec)
+GOAL_FROM_PENALTY = 12        # flat, all positions — LIVE 2026-08-07
 ASSIST = 9
 CLEAN_SHEET = 12              # GK/DEF only
 GOAL_CONCEDED = -4            # GK/DEF only, per goal
@@ -45,7 +45,14 @@ SHOT_OFF_TARGET = -1
 PASS_COMPLETION_MIN_ATTEMPTS = 30
 PASS_COMPLETION = ((0.90, 6), (0.80, 4), (0.70, 2))   # highest band first
 PENALTY_CONCEDED = -3         # DROPPED as noise
-PENALTY_MISSED = -6           # PARKED with the penalties work
+PENALTY_MISSED = -6           # LIVE 2026-08-07 (note: -2 POINTS, -6 BPS)
+
+# Canonical home for the conversion rate: measured over PL 2024/25 + 2025/26
+# (175 penalties taken, 146 scored, 29 missed). fpl_bps has no imports, so both
+# statz_functions and fpl_bonus_sim can read it from here without a cycle —
+# they each held their own copy until 2026-08-07, which is a drift waiting to
+# happen. Two seasons is a thin sample; revisit as history accumulates.
+PENALTY_CONVERSION_RATE = 0.834
 YELLOW_CARD = -3
 RED_CARD = -9                 # DROPPED as noise
 OWN_GOAL = -6                 # DROPPED as noise
@@ -84,16 +91,18 @@ def score(stats, position, *, include_dropped=False):
     """BPS for one realised player-match.
 
     `stats` keys (all counts, all optional and defaulting to 0):
-        minutes, goals, assists, clean_sheet, goals_conceded,
+        minutes, goals (NON-PENALTY when the split is supplied), pen_goals,
+        pens_missed, assists, clean_sheet, goals_conceded,
         saves, saves_in_box, key_passes, big_chances_created,
         big_chances_missed, cbi, recoveries, tackles_won,
         dribbles, shots, shots_on_target, passes, accurate_passes,
         fouls, fouls_drawn, offsides, yellow_cards, winning_goal
 
     `include_dropped` additionally scores the actions the spec drops as noise
-    (penalty saves, red cards, own goals, penalties missed) — used by the
-    validation harness to size what dropping them costs, never in production.
-    Requires: pens_saved, red_cards, own_goals, pens_missed.
+    (penalty saves, red cards, own goals) — used by the validation harness to
+    size what dropping them costs, never in production. Penalties missed used
+    to sit here too; it is scored unconditionally now.
+    Requires: pens_saved, red_cards, own_goals.
     """
     g = stats.get
     minutes = g('minutes', 0)
@@ -102,8 +111,16 @@ def score(stats, position, *, include_dropped=False):
 
     total = appearance_bps(minutes)
 
-    # Attacking
+    # Attacking.
+    # `goals` is NON-PENALTY goals when the caller supplies the split; penalties
+    # score 12 flat regardless of position, so a FORWARD's penalty is worth half
+    # his open-play goal and a MID's a third less. Scoring every goal at the
+    # position rate — which is what we did until 2026-08-07 — overstates every
+    # designated taker's BPS, and therefore his bonus.
     total += g('goals', 0) * GOAL.get(position, 0)
+    total += g('pen_goals', 0) * GOAL_FROM_PENALTY
+    # A penalty MISS is -6 BPS (it is -2 POINTS — different scales, both real).
+    total += g('pens_missed', 0) * PENALTY_MISSED
     total += g('assists', 0) * ASSIST
     total += g('key_passes', 0) * KEY_PASS
     total += g('big_chances_created', 0) * BIG_CHANCE_CREATED
@@ -141,6 +158,8 @@ def score(stats, position, *, include_dropped=False):
         total += g('pens_saved', 0) * PENALTY_SAVE
         total += g('red_cards', 0) * RED_CARD
         total += g('own_goals', 0) * OWN_GOAL
-        total += g('pens_missed', 0) * PENALTY_MISSED
+        # pens_missed moved OUT of this block on 2026-08-07 — it is scored in
+        # the main path now that penalties are projected. Leaving it here too
+        # would double-count it whenever include_dropped is set.
 
     return total
