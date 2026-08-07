@@ -81,7 +81,19 @@ def parse_league(html):
 def scrape(session, league):
     url = f"https://www.transfermarkt.co.uk/{league['league_dashed'].lower()}/startseite/wettbewerb/{league['code']}{league['div']}"
     for attempt in (1, 2):
-        resp = session.get(url, headers=HEADERS, timeout=30)
+        # A dropped connection or a read timeout is a transient network fault,
+        # not a block — treat it like a 5xx rather than letting it surface as
+        # a traceback. Matters more now the scrape runs from a laptop on wifi
+        # than it did on a datacentre link.
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=30)
+        except requests.RequestException as err:
+            if attempt == 1:
+                print(f"{league['league_dashed']}: {type(err).__name__} — retrying in 60s")
+                time.sleep(60)
+                continue
+            print(f"ABORT: {type(err).__name__} on {url} — network unreachable, stopping run.")
+            sys.exit(1)
         if resp.status_code == 200:
             return parse_league(resp.text)
         if 500 <= resp.status_code < 600 and attempt == 1:
