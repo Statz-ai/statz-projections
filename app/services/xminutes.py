@@ -117,6 +117,25 @@ XMIN_SCALED_STAT_COLS = [
     # number, identical in every fixture, so bonus never responded to the
     # opponent while DefCon did.
     "Tackles Won",
+    # The penalty split. Both MUST be here even though the cascade overwrites
+    # 'Penalties Scored' later, for two reasons:
+    #
+    #  1. Minutes. These arrive as team_proj x share (per-start), exactly like
+    #     'Goals'. Left out of this list they never convert to expected
+    #     minutes, so the points path scored a rotation player's non-penalty
+    #     goals at per-start scale — Welbeck read 0.44 against a correctly
+    #     scaled 'Goals' of 0.34, a 29% overstatement. Nailed starters were
+    #     barely affected, which is what made it easy to miss.
+    #  2. The per-90 companion. fpl_bonus_sim keys the whole penalty split on
+    #     'Non-Penalty Goals per90' being present; without it, it silently fell
+    #     back to undivided 'Goals' and kept scoring penalties at 12/18/24 by
+    #     position instead of 12 flat — i.e. the BPS half of the work did
+    #     nothing at all.
+    #
+    # The cascade runs AFTER apply_per90_scaling and re-derives the per-90 to
+    # keep col == per90 x xmin_bands / 90, so scaling here is not double-applied
+    # to 'Penalties Scored'.
+    "Non-Penalty Goals", "Penalties Scored",
     "Clearances Average", "Blocked Shots Average", "Ball Recovery Average",
     "Tackles Won Average", "CBIT Average",
 ]
