@@ -47,6 +47,17 @@ logger = logging.getLogger("projection")
 # tiles can read DIALLED values. frame column -> DB column. Team-level tiles
 # (clean sheet %, xGC) come from fixture_projections and are not affected by a
 # player dial, so they stay where they are.
+# Penalty split constants, measured over PL 2024/25 + 2025/26 (175 penalties
+# taken, 146 scored, 29 missed):
+#   - penalties are 6.76% of all goals scored
+#   - converted at 83.4%
+# George reviewed both against his recollection of the long-run figures (78%
+# conversion, 8-9% share) and chose the measured pair, 2026-08-07. Kept as
+# named constants precisely because two seasons is a thin sample and these
+# should be revisited once more history is available.
+PENALTY_GOAL_SHARE = 0.0676
+PENALTY_CONVERSION_RATE = 0.834
+
 FPL_STAT_COLUMNS = {
     'Goals': 'proj_goals',
     'Assists': 'proj_assists',
@@ -61,6 +72,11 @@ FPL_DEF_EXTRA_COLS = [
     'Clearances Blocks Interceptions (FPL)',
     'Clearances Blocks Interceptions Tackles (FPL)',
     'Tackles Won',
+    # Penalty split — the player-level values distribute() derives from the
+    # team columns above. Without them here the whole split is dropped by the
+    # column filter, exactly as the combined CBIT column was.
+    'Non-Penalty Goals',
+    'Penalties Scored',
     'Big Chances Created',
 ]
 
@@ -1589,6 +1605,31 @@ class ProjectionService:
             # negative tackle count; fall back to the modelled column there.
             team_projections['Tackles Won'] = _tkl_from_cbit.where(
                 _tkl_from_cbit > 0, team_projections['Tackles'])
+            # Split the goal projection into penalty and non-penalty halves.
+            #
+            # Penalties are taken as a fixed PROPORTION of projected goals, not
+            # a flat per-match constant, so an attacking team is projected more
+            # of them (George's call, 2026-08-07). Note the measured
+            # correlation between a team's goals and its penalties across PL
+            # 25/26 was 0.029 — i.e. none — with Brentford winning 10 on 55
+            # goals against Man City's 4 on 77. George's position is that the
+            # mechanism is real and one season of 2-10 counts is too noisy to
+            # disprove it; the risk is City runs high and Brentford low.
+            #
+            # Constants measured over PL 24/25 + 25/26 (175 penalties):
+            # penalties are 6.76% of goals, converted at 83.4%.
+            # A proportional split cannot leak or invent goals — the two halves
+            # always sum back to the original projection.
+            _pg = team_projections['Goals'] * PENALTY_GOAL_SHARE
+            team_projections['Non-Penalty Goals'] = team_projections['Goals'] - _pg
+            # Named 'Penalties Scored' rather than 'Penalty Goals' so it matches
+            # the PLAYER stat of the same name (111). distribute() resolves a
+            # share for every team column by looking up the identically-named
+            # player stat, so a column with no player counterpart hands every
+            # player a zero share. Attempts and misses derive from this
+            # downstream (attempts = scored / conversion), avoiding a second
+            # distributed column that would need its own share.
+            team_projections['Penalties Scored'] = _pg
 
         saves = []
         for i in range(len(team_projections)):
@@ -1616,7 +1657,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won', 'Non-Penalty Goals', 'Penalties Scored']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4030,6 +4071,31 @@ class ProjectionService:
             # negative tackle count; fall back to the modelled column there.
             team_projections['Tackles Won'] = _tkl_from_cbit.where(
                 _tkl_from_cbit > 0, team_projections['Tackles'])
+            # Split the goal projection into penalty and non-penalty halves.
+            #
+            # Penalties are taken as a fixed PROPORTION of projected goals, not
+            # a flat per-match constant, so an attacking team is projected more
+            # of them (George's call, 2026-08-07). Note the measured
+            # correlation between a team's goals and its penalties across PL
+            # 25/26 was 0.029 — i.e. none — with Brentford winning 10 on 55
+            # goals against Man City's 4 on 77. George's position is that the
+            # mechanism is real and one season of 2-10 counts is too noisy to
+            # disprove it; the risk is City runs high and Brentford low.
+            #
+            # Constants measured over PL 24/25 + 25/26 (175 penalties):
+            # penalties are 6.76% of goals, converted at 83.4%.
+            # A proportional split cannot leak or invent goals — the two halves
+            # always sum back to the original projection.
+            _pg = team_projections['Goals'] * PENALTY_GOAL_SHARE
+            team_projections['Non-Penalty Goals'] = team_projections['Goals'] - _pg
+            # Named 'Penalties Scored' rather than 'Penalty Goals' so it matches
+            # the PLAYER stat of the same name (111). distribute() resolves a
+            # share for every team column by looking up the identically-named
+            # player stat, so a column with no player counterpart hands every
+            # player a zero share. Attempts and misses derive from this
+            # downstream (attempts = scored / conversion), avoiding a second
+            # distributed column that would need its own share.
+            team_projections['Penalties Scored'] = _pg
 
         saves = []
         for i in range(len(team_projections)):
@@ -4051,7 +4117,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won', 'Non-Penalty Goals', 'Penalties Scored']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -4748,6 +4814,31 @@ class ProjectionService:
             # negative tackle count; fall back to the modelled column there.
             team_projections['Tackles Won'] = _tkl_from_cbit.where(
                 _tkl_from_cbit > 0, team_projections['Tackles'])
+            # Split the goal projection into penalty and non-penalty halves.
+            #
+            # Penalties are taken as a fixed PROPORTION of projected goals, not
+            # a flat per-match constant, so an attacking team is projected more
+            # of them (George's call, 2026-08-07). Note the measured
+            # correlation between a team's goals and its penalties across PL
+            # 25/26 was 0.029 — i.e. none — with Brentford winning 10 on 55
+            # goals against Man City's 4 on 77. George's position is that the
+            # mechanism is real and one season of 2-10 counts is too noisy to
+            # disprove it; the risk is City runs high and Brentford low.
+            #
+            # Constants measured over PL 24/25 + 25/26 (175 penalties):
+            # penalties are 6.76% of goals, converted at 83.4%.
+            # A proportional split cannot leak or invent goals — the two halves
+            # always sum back to the original projection.
+            _pg = team_projections['Goals'] * PENALTY_GOAL_SHARE
+            team_projections['Non-Penalty Goals'] = team_projections['Goals'] - _pg
+            # Named 'Penalties Scored' rather than 'Penalty Goals' so it matches
+            # the PLAYER stat of the same name (111). distribute() resolves a
+            # share for every team column by looking up the identically-named
+            # player stat, so a column with no player counterpart hands every
+            # player a zero share. Attempts and misses derive from this
+            # downstream (attempts = scored / conversion), avoiding a second
+            # distributed column that would need its own share.
+            team_projections['Penalties Scored'] = _pg
 
         saves = []
         for i in range(len(team_projections)):
@@ -4775,7 +4866,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won', 'Non-Penalty Goals', 'Penalties Scored']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
@@ -5627,6 +5718,31 @@ class ProjectionService:
             # negative tackle count; fall back to the modelled column there.
             team_projections['Tackles Won'] = _tkl_from_cbit.where(
                 _tkl_from_cbit > 0, team_projections['Tackles'])
+            # Split the goal projection into penalty and non-penalty halves.
+            #
+            # Penalties are taken as a fixed PROPORTION of projected goals, not
+            # a flat per-match constant, so an attacking team is projected more
+            # of them (George's call, 2026-08-07). Note the measured
+            # correlation between a team's goals and its penalties across PL
+            # 25/26 was 0.029 — i.e. none — with Brentford winning 10 on 55
+            # goals against Man City's 4 on 77. George's position is that the
+            # mechanism is real and one season of 2-10 counts is too noisy to
+            # disprove it; the risk is City runs high and Brentford low.
+            #
+            # Constants measured over PL 24/25 + 25/26 (175 penalties):
+            # penalties are 6.76% of goals, converted at 83.4%.
+            # A proportional split cannot leak or invent goals — the two halves
+            # always sum back to the original projection.
+            _pg = team_projections['Goals'] * PENALTY_GOAL_SHARE
+            team_projections['Non-Penalty Goals'] = team_projections['Goals'] - _pg
+            # Named 'Penalties Scored' rather than 'Penalty Goals' so it matches
+            # the PLAYER stat of the same name (111). distribute() resolves a
+            # share for every team column by looking up the identically-named
+            # player stat, so a column with no player counterpart hands every
+            # player a zero share. Attempts and misses derive from this
+            # downstream (attempts = scored / conversion), avoiding a second
+            # distributed column that would need its own share.
+            team_projections['Penalties Scored'] = _pg
 
         saves = []
         for i in range(len(team_projections)):
@@ -5654,7 +5770,7 @@ class ProjectionService:
             team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
         # Retain Ball Recovery + CBI(FPL) columns when present (added by the
         # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won']
+        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)', 'Clearances Blocks Interceptions Tackles (FPL)', 'Tackles Won', 'Non-Penalty Goals', 'Penalties Scored']
                            if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',

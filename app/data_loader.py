@@ -188,6 +188,7 @@ class LeagueDataLoader:
             # Championship history carries defensive data instead of collapsing to
             # a ~0 share. Must come AFTER the overlay: FPL keeps precedence on PL.
             await self._derive_cbit_from_components(conn)
+            await self._derive_non_penalty_goals(conn)
             self._load_local_files()
             self._loaded = True
             logger.info(
@@ -1180,6 +1181,155 @@ class LeagueDataLoader:
             "[CBIT derive] player rows added %d, team rows added %d (all leagues)",
             n_player, n_team,
         )
+
+    async def _derive_non_penalty_goals(self, conn) -> None:
+        """Build Non-Penalty Goals (999004) = Goals - Penalties Scored.
+
+        FPL goal shares come from `Goals`, which INCLUDES penalties, so a
+        designated taker's share is inflated by spot-kicks and keeps paying him
+        for them even if he loses the duty. Splitting the projection into
+        penalty and non-penalty halves only works if the share feeding the
+        non-penalty half excludes them too — otherwise takers are counted twice.
+
+        Both inputs are already imported and reconcile: across the PL 25/26 we
+        hold 92 penalties taken against the 92 actually awarded (George
+        confirmed), 77 scored and 15 missed.
+
+        Player rows: emitted for every player with a Goals row. A player with
+        goals and no penalty row keeps his full total — Sportmonks stores no
+        zero rows, so absent means none taken, not missing.
+
+        Team rows: summed from the DB over ALL players, not from
+        self.player_stats, for the same reason _team_totals_from_db exists —
+        that frame is scoped to the run's players, so summing it would understate
+        the team and inflate every share. That mistake put Abdulkadir Omur on a
+        99.89% DefCon.
+        """
+        if self.player_stats is None or self.player_stats.empty:
+            return
+        if self.team_stats is None:
+            return
+
+        def _sid(name):
+            m = self.stats_types[self.stats_types["name"] == name]
+            return int(m["id"].iloc[0]) if not m.empty else None
+
+        npg_id = _sid("Non-Penalty Goals")
+        goals_id = _sid("Goals")
+        pens_id = _sid("Penalties Scored")
+        if npg_id is None or goals_id is None:
+            logger.warning("[NPG derive] missing stats_types — skipped")
+            return
+
+        ps = self.player_stats
+        ps["value"] = pd.to_numeric(ps["value"], errors="coerce")
+
+        goals = ps[ps["stats_type_id"] == goals_id][
+            ["player_id", "fixture_id", "team_id", "value"]
+        ].rename(columns={"value": "goals"})
+        if goals.empty:
+            return
+        if pens_id is not None:
+            pens = ps[ps["stats_type_id"] == pens_id][
+                ["player_id", "fixture_id", "value"]
+            ].rename(columns={"value": "pens"})
+            merged = goals.merge(pens, on=["player_id", "fixture_id"], how="left")
+        else:
+            merged = goals.assign(pens=0.0)
+        merged["pens"] = merged["pens"].fillna(0.0)
+        merged["npg"] = (merged["goals"] - merged["pens"]).clip(lower=0)
+
+        have = set(
+            map(tuple, ps.loc[ps["stats_type_id"] == npg_id, ["player_id", "fixture_id"]].values)
+        )
+        if have:
+            merged = merged[
+                ~merged.apply(lambda r: (r["player_id"], r["fixture_id"]) in have, axis=1)
+            ]
+
+        n_player = 0
+        if not merged.empty:
+            self.player_stats = pd.concat([ps, pd.DataFrame({
+                "player_id": merged["player_id"].astype("int64"),
+                "fixture_id": merged["fixture_id"].astype("int64"),
+                "team_id": merged["team_id"].astype("int64"),
+                "stats_type_id": npg_id,
+                "value": merged["npg"].astype(float),
+            })], ignore_index=True)
+            ps = self.player_stats
+            n_player = len(merged)
+
+        # ---- team-level totals, from the DB over ALL players ----
+        n_team = 0
+        fixture_ids = sorted({int(x) for x in ps["fixture_id"].dropna().unique()})
+        if fixture_ids:
+            totals = await self._npg_team_totals_from_db(conn, fixture_ids, goals_id, pens_id)
+            # Team-level rows for BOTH synthetic quantities. Penalties Scored
+            # needs a team total of its own because that is the DENOMINATOR of
+            # the player's penalty share — team_stats holds no such row
+            # otherwise, and the share would collapse to zero for everyone.
+            for stat_id, col in ((npg_id, "value"), (pens_id, "pens")):
+                if stat_id is None or totals is None or totals.empty or col not in totals.columns:
+                    continue
+                ts = self.team_stats
+                keys = set(map(tuple, totals[["fixture_id", "team_id"]].astype("int64").values))
+                if not ts.empty:
+                    _same = ts["stats_type_id"] == stat_id
+                    _drop = _same & pd.Series(
+                        [(int(f), int(t)) in keys if pd.notna(f) and pd.notna(t) else False
+                         for f, t in zip(ts["fixture_id"], ts["team_id"])],
+                        index=ts.index,
+                    )
+                    if _drop.any():
+                        ts = ts[~_drop]
+                self.team_stats = pd.concat([ts, pd.DataFrame({
+                    "fixture_id": totals["fixture_id"].astype("int64"),
+                    "team_id": totals["team_id"].astype("int64"),
+                    "stats_type_id": stat_id,
+                    "value": totals[col].astype(float),
+                })], ignore_index=True)
+                n_team += len(totals)
+
+        logger.info(
+            "[NPG derive] player rows added %d, team rows added %d", n_player, n_team
+        )
+
+    async def _npg_team_totals_from_db(self, conn, fixture_ids, goals_id, pens_id):
+        """Team Non-Penalty Goals per (fixture, team), aggregated in SQL.
+
+        Chunked at 1,500 fixtures, mirroring _team_totals_from_db.
+        """
+        import pandas as pd
+        want = [i for i in (goals_id, pens_id) if i is not None]
+        rows = []
+        for i in range(0, len(fixture_ids), 1500):
+            chunk = fixture_ids[i:i + 1500]
+            fph = ",".join(["%s"] * len(chunk))
+            sph = ",".join(["%s"] * len(want))
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""SELECT fixture_id, team_id, stats_type_id, SUM(value)
+                          FROM fixture_player_stats
+                         WHERE stats_type_id IN ({sph}) AND fixture_id IN ({fph})
+                         GROUP BY fixture_id, team_id, stats_type_id""",
+                    tuple(want) + tuple(chunk),
+                )
+                rows.extend(await cur.fetchall())
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["fixture_id", "team_id", "stats_type_id", "value"])
+        df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
+        g = df[df["stats_type_id"] == goals_id].groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+        if pens_id is None:
+            return g
+        p = (df[df["stats_type_id"] == pens_id]
+             .groupby(["fixture_id", "team_id"], as_index=False)["value"].sum()
+             .rename(columns={"value": "pens"}))
+        out = g.merge(p, on=["fixture_id", "team_id"], how="left")
+        out["pens"] = out["pens"].fillna(0.0)
+        out["value"] = (out["value"] - out["pens"]).clip(lower=0)
+        # `pens` retained: the caller writes team-level Penalties Scored from it.
+        return out[["fixture_id", "team_id", "value", "pens"]]
 
     async def _team_totals_from_db(self, conn, fixture_ids, comp_ids, rec_id):
         """{stat_id: DataFrame[fixture_id, team_id, value]} — true team totals.

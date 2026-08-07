@@ -98,6 +98,16 @@ TEAM_STAT_NAMES = (
     # FPL and Sportmonks agree on the total to 0.3%, so one definition is
     # strictly simpler with no loss. George, 2026-08-04.
     "Clearances Blocks Interceptions Tackles (FPL)",
+    # Non-Penalty Goals (999004, FPL-synthetic): Goals - Penalties Scored,
+    # derived for every league by LeagueDataLoader. The FPL goal projection is
+    # split into penalty and non-penalty halves, and the share feeding the
+    # non-penalty half has to exclude penalties or designated takers are
+    # counted twice. George, 2026-08-07.
+    "Non-Penalty Goals",
+    # Team-level Penalties Scored is the DENOMINATOR of the player's penalty
+    # share. Sportmonks publishes no team row for it, so the loader derives one
+    # by summing every player's; without it the share collapses to zero.
+    "Penalties Scored",
 )
 
 # Stats queried from fixture_player_stats.
@@ -161,6 +171,13 @@ PLAYER_STAT_NAMES = (
     # FPL and Sportmonks agree on the total to 0.3%, so one definition is
     # strictly simpler with no loss. George, 2026-08-04.
     "Clearances Blocks Interceptions Tackles (FPL)",
+    # Non-Penalty Goals (999004) + its inputs. Penalties Scored is loaded in its
+    # own right so the derive can subtract it, and so the penalty projection can
+    # measure who actually takes them: 92 taken across PL 25/26 against the 92
+    # actually awarded.
+    "Non-Penalty Goals",
+    "Penalties Scored",
+    "Penalties Missed",
     # BPS static-rate stats (fpl_static_rates.py). Player traits rated per-90
     # from history rather than projected team-down, so they need PLAYER rows
     # only — deliberately absent from TEAM_STAT_NAMES.
