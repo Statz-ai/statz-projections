@@ -1854,8 +1854,15 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     #    player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)
     #    player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]
 
-    if stat in ('Expected Goals (xG)', 'Expected Assists (xA)'):  # NEW - moved from above; xA fractional too (2026-07-30)
-        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(float)  # NEW
+    # The TEAM denominator has its own cast, separate from the player value
+    # above — a fractional stat has to be listed in BOTH or the share is wrong
+    # at one end. A team's npxG in a match is ~1.3; astype(int) truncates that
+    # to 1 (inflating every player's share ~30%) and a sub-1.0 match to ZERO,
+    # which sends the share to inf/NaN. Same failure the xA fix caught on the
+    # player side in July, one line further down the same function.
+    if stat in ('Expected Goals (xG)', 'Expected Assists (xA)',
+                'Non-Penalty Expected Goals'):
+        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(float)
     else:  # NEW
         player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)  # NEW
     player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]  # NEW
