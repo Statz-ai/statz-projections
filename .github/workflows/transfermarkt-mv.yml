@@ -4,6 +4,16 @@ name: Transfermarkt market values
 # prod server's IP is AWS-WAF-challenged (HTTP 202) since Jul 2026, so this
 # must NOT be moved onto the projection box.
 #
+# HOWEVER, as of Aug 2026 this workflow no longer works either: Transfermarkt's
+# WAF now challenges GitHub's runner ranges too, so every run aborts on the
+# first league. Last data landed 21 Jul 2026. The block is by IP range, not
+# behaviour — a slower cadence will not help, and residential connections are
+# what it is not aimed at.
+#
+# Left enabled and scheduled so it resumes on its own if the ranges are ever
+# unblocked. It now exits non-zero when blocked (it used to exit 0 and report
+# success), so a red run here means still-blocked, not newly-broken.
+#
 # Cadence (George, 2026-07-30): squad value is now a weighted component of the
 # Team Strength rating behind the outrights page — 10% normally and 30% for
 # promoted sides — so it needs to track the transfer windows rather than drift

@@ -89,8 +89,14 @@ def scrape(session, league):
             continue
         # 202/403/etc = challenge or block. Abort the whole run — retrying
         # or continuing across leagues is how an IP gets flagged.
-        print(f"ABORT: HTTP {resp.status_code} on {url} — challenged/blocked, stopping run.")
-        sys.exit(0 if resp.status_code == 202 else 1)
+        #
+        # Always exit non-zero. A 202 used to exit 0 as a polite back-off,
+        # which meant a blocked run showed green: the Action reported success
+        # daily from 21 Jul to 7 Aug 2026 while landing no data at all. A run
+        # that scraped nothing is a failed run, whatever the reason.
+        reason = "challenged (WAF)" if resp.status_code == 202 else "blocked/unavailable"
+        print(f"ABORT: HTTP {resp.status_code} on {url} — {reason}, stopping run.")
+        sys.exit(1)
     return []
 
 
@@ -116,6 +122,12 @@ def main():
         print(f"{league['league_dashed']}: upserted {result['upserted']}")
 
     print(f"Done — {ok}/{len(leagues)} leagues refreshed")
+    if not ok:
+        # Reached the end without a single league landing — every page parsed
+        # to zero rows. Same rule as the abort above: nothing scraped is a
+        # failure, not a quiet success.
+        print("FAIL: no leagues refreshed.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
