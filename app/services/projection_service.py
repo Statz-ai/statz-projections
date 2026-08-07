@@ -2410,6 +2410,30 @@ class ProjectionService:
                             logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
                                         f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
 
+                        # Penalty-taker cascade from FPL's designated order,
+                        # BEFORE the dials so a panel override still wins. Must
+                        # run after per-90 scaling: the cascade already carries
+                        # the minutes term (xMins/90), so scaling it again would
+                        # apply minutes twice. George, 2026-08-07.
+                        try:
+                            from app.services.fpl_penalties import apply_penalty_order_shares
+                            _pen_map = {}
+                            _fm = ProjectionService._current_source.fpl_player_mappings
+                            if _fm is not None and 'penalties_order' in getattr(_fm, 'columns', []):
+                                for _r in _fm.itertuples(index=False):
+                                    _o = getattr(_r, 'penalties_order', None)
+                                    if _o is not None and not pd.isna(_o):
+                                        _pen_map[int(_r.player_id)] = int(_o)
+                            if _pen_map:
+                                _fpl_frame = apply_penalty_order_shares(
+                                    _fpl_frame, _pen_map, team_projections)
+                            else:
+                                logger.warning(f"[{league}] no penalties_order rows — "
+                                               "penalty shares left on history")
+                        except Exception as _pen_err:
+                            # Never fatal: falling back to historical penalty shares is
+                            # the old behaviour, not a broken run.
+                            logger.warning(f"[{league}] penalty order shares skipped: {_pen_err}")
                         # §12 Phase 5: share/defcon dials — replacement at
                         # assembly, after per-90 scaling. Runs BEFORE the DC
                         # recompute (it used to run after): defcon_share is a

@@ -1028,19 +1028,26 @@ class LeagueDataLoader:
             """
             SELECT m.player_id, m.fpl_id, m.fpl_code, m.fpl_element_type,
                    m.fpl_first_name, m.fpl_second_name, m.fpl_web_name,
-                   ftm.team_id AS fpl_club_team_id
+                   ftm.team_id AS fpl_club_team_id,
+                   -- FPL's designated penalty order (1, 2, 3...), NULL for
+                   -- most players. Drives the penalty-taker cascade in
+                   -- fpl_penalties. Read from the SAME snapshot row that
+                   -- gates membership, so the order can never be staler than
+                   -- the squad it belongs to. Joined rather than sub-selected
+                   -- for that reason; (player_id, snapshot_date) is unique so
+                   -- this cannot fan out rows.
+                   s.penalties_order
             FROM fpl_player_mappings m
             LEFT JOIN fpl_team_mappings ftm ON ftm.fpl_id = m.fpl_team_id
-            WHERE m.player_id IN (
-                SELECT s.player_id FROM fpl_player_snapshots s
-                WHERE s.snapshot_date = (
+            JOIN fpl_player_snapshots s
+              ON s.player_id = m.player_id
+             AND s.snapshot_date = (
                     SELECT snapshot_date FROM fpl_player_snapshots
                     GROUP BY snapshot_date
                     HAVING COUNT(DISTINCT player_id) >= %s
                     ORDER BY snapshot_date DESC
                     LIMIT 1
                 )
-            )
             """,
             (FPL_SNAPSHOT_MIN_PLAYERS,),
         )
