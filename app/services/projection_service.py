@@ -2502,6 +2502,19 @@ class ProjectionService:
 
                         _bundle_frame['CBIT Hit Rate'] = _bundle_frame.apply(_td_cbit_hit_rate, axis=1)
                         _bundle_frame['def_con_pct'] = (_bundle_frame['CBIT Hit Rate'] * 100).round(2)
+                        # Penalty cascade on the SNAPSHOT too. Recalc re-derives it on load,
+                        # so this is idempotent and cannot double-count — but without it the
+                        # bundle carries raw HISTORICAL penalty shares while the live points
+                        # carry cascade ones, and the two silently disagree. That gap cost an
+                        # evening: measuring the bundle read as "penalties 25% light" when the
+                        # live numbers were correct all along.
+                        try:
+                            from app.services.fpl_penalties import apply_penalty_order_shares
+                            if _pen_map:
+                                _bundle_frame = apply_penalty_order_shares(
+                                    _bundle_frame, _pen_map, team_projections)
+                        except Exception as _bpen_err:
+                            logger.warning(f"[{league}] bundle penalty shares skipped: {_bpen_err}")
                         await save_assembly_bundles(_bundle_frame, score_preds, team_projections)
                 except Exception as _bundle_err:
                     logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")

@@ -268,9 +268,32 @@ def apply_penalty_order_shares(frame, order_by_pid, team_predictions):
         p90[applied.to_numpy()] = rate[applied.to_numpy()]
         frame[p90_col] = p90
 
+    # Reconciliation. The cascade assigns `share x team_pens` with shares plus
+    # residual summing to 1, so the allocated total MUST equal the team total
+    # over the clubs it touched. Emitted every run because the alternative is
+    # measuring it by hand afterwards — which is how a whole evening went into
+    # "penalties are 25% light" that turned out to be the wrong frame entirely
+    # (the bundle snapshot, which deliberately has no cascade). If this line
+    # ever reads anything but ~1.000, the allocation really is broken.
+    _alloc = float(new_pens[applied].sum())
+    _team_total = 0.0
+    for _, idx in merged.groupby(["fixture_id", "Team"], sort=False).groups.items():
+        if not applied.loc[idx].any():
+            continue
+        _tp = team_pens.loc[idx].dropna()
+        if not _tp.empty:
+            _team_total += float(_tp.iloc[0])
+    _ratio = (_alloc / _team_total) if _team_total > 0 else float("nan")
     logger.info(
         "[FPL pens] order shares applied: %d club-fixtures, %d designated "
-        "taker rows, %d unlisted rows (residual only)",
+        "taker rows, %d unlisted rows (residual only) | allocated %.3f vs "
+        "team %.3f = %.4f (expect 1.0000)",
         n_clubs, n_takers, int(applied.sum()) - n_takers,
+        _alloc, _team_total, _ratio,
     )
+    if _team_total > 0 and abs(_ratio - 1.0) > 0.005:
+        logger.warning(
+            "[FPL pens] allocation does NOT reconcile (%.4f) — player penalties "
+            "do not sum to the team projection", _ratio,
+        )
     return frame
