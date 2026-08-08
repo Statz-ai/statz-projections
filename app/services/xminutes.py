@@ -484,13 +484,27 @@ def apply_share_dials(frame, dials_df, team_predictions):
     apply_per90_scaling and any CBIT recompute."""
     if dials_df is None or len(dials_df) == 0:
         return frame
-    team_cols = [c for c in ("Goals", "Assists") if c in team_predictions.columns]
+    # goal_share targets NON-PENALTY goals. Penalty duty is set separately in
+    # the penalty tab, so a dial covering total goals would fight it: a
+    # designated taker's share already contains his spot-kicks and the cascade
+    # allocates them again. George, 2026-08-08.
+    #
+    # This also fixes an inert dial. Since the penalty split shipped, points
+    # read 'Non-Penalty Goals' + 'Penalties Scored' and the bonus simulator
+    # reads 'Non-Penalty Goals per90' — nothing read 'Goals' any more, so
+    # writing it did nothing at all, silently.
+    #
+    # Falls back to 'Goals' where the split is absent (non-PL), which is the
+    # pre-split behaviour and still correct there.
+    _goal_col = ("Non-Penalty Goals" if "Non-Penalty Goals" in team_predictions.columns
+                 and "Non-Penalty Goals" in frame.columns else "Goals")
+    team_cols = [c for c in (_goal_col, "Assists") if c in team_predictions.columns]
     tp = team_predictions[["fixture_id", "Team"] + team_cols].rename(
         columns={c: f"_team_{c}" for c in team_cols}
     ).drop_duplicates(subset=["fixture_id", "Team"])
     frame = frame.merge(tp, on=["fixture_id", "Team"], how="left")
 
-    for stat_col, dial_col in (("Goals", "goal_share"), ("Assists", "assist_share")):
+    for stat_col, dial_col in ((_goal_col, "goal_share"), ("Assists", "assist_share")):
         if stat_col not in frame.columns or f"_team_{stat_col}" not in frame.columns:
             continue
         dial_map = {

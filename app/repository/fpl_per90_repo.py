@@ -35,6 +35,13 @@ async def insert_per90_shares_async(rows: list, competition_id: int):
         if stat == 'Goals':
             partner = by_key.get((pid, 'Expected Goals (xG)'))
             out_name = 'Goals (blended)'
+        elif stat == 'Non-Penalty Goals':
+            # The baseline the goal_share slider now sits on. The dial targets
+            # NON-PENALTY goals (penalty duty is set in the penalty tab), so
+            # the ghost has to be the non-penalty blend or the slider would
+            # open on a number that includes spot-kicks the dial cannot move.
+            partner = by_key.get((pid, 'Non-Penalty Expected Goals'))
+            out_name = 'Non-Penalty Goals (blended)'
         elif stat == 'Assists':
             partner = by_key.get((pid, 'Expected Assists (xA)'))
             out_name = 'Assists (blended)'
