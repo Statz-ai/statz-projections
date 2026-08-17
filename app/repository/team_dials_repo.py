@@ -2,20 +2,30 @@
 Repo for the projections_team_dials table — per-team Attack / Defence
 overrides set by an admin operator in the Projections Admin Console.
 
-Each row is a (competition_id, team_id) override. Values are signed
-percentage adjustments (-50..+50) applied to the team's Attack and/or
-Defence rating during projection. A row with both adjustments at 0 is
-deleted by the Laravel controller, so any row returned here is by
-definition "active".
+Each row is a (competition_id, team_id) override. Values are signed OFFSETS
+in whole rating points on the mean-100 index — +14 means "the model is
+under-rating this team's attack by 14". They were percentages until
+2026-08-17; a percentage scaled with the model, so an operator's adjustment
+shrank whenever the model turned more pessimistic about the team they were
+disagreeing with. A row with both offsets at 0 is deleted by the Laravel
+controller, so any row returned here is by definition "active".
 
 Applied after the market-value adjustment but before the rescale-to-
 mean=100 step, so dialled teams shift the league mean and other teams'
-indexed values drift naturally. Two call sites today:
+indexed values drift naturally.
 
-  - projection_service._prepare_league() for single-league projections.
-  - euro_comp_projection_service._project() per inner domestic league
-    in the cross-league rating set — propagates a team's dial to its
-    appearances in CL / Europa / Conf League ratings too.
+ONE call site: projection_service._prepare_league(), which handles the
+domestic leagues.
+
+It used to also run inside euro_comp_projection_service, and this docstring
+went on claiming so for three months after it stopped being true. Euro comps
+have read the latest DOMESTIC team_ratings row since May 2026 rather than
+recomputing — and that row is already post-dial, so a dial still reaches
+CL / Europa / Conference by inheritance. There is nothing to apply there.
+
+International comps (World Cup, Friendly International) route to
+InternationalProjectionService, which has no dial support at all. The admin
+panel refuses to set a dial on either family, since nothing would read it.
 """
 import logging
 
@@ -26,7 +36,7 @@ logger = logging.getLogger("team_dials_repo")
 
 
 async def load_team_dials(competition_id: int) -> dict:
-    """Return {team_id: (attack_pct, defense_pct)} for a competition.
+    """Return {team_id: (attack_offset, defense_offset)} for a competition.
 
     Empty dict if no dials are set. Zero is filtered out at write time, so
     any value here is a real override.
