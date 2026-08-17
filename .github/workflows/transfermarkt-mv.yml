@@ -1,37 +1,39 @@
-name: Transfermarkt market values
+name: Transfermarkt WAF probe — RED MEANS UNBLOCKED
 
-# Refreshes transfermarkt_market_value_snapshots from GitHub egress IPs — the
-# prod server's IP is AWS-WAF-challenged (HTTP 202) since Jul 2026, so this
-# must NOT be moved onto the projection box.
+# This workflow does NOT collect market values. It answers one question once a
+# week: are GitHub's runners still challenged by Transfermarkt's WAF?
 #
-# HOWEVER, as of Aug 2026 this workflow no longer works either: Transfermarkt's
-# WAF now challenges GitHub's runner ranges too, so every run aborts on the
-# first league. Last data landed 21 Jul 2026. The block is by IP range, not
-# behaviour — a slower cadence will not help, and residential connections are
-# what it is not aimed at.
+# Background. Transfermarkt put AWS WAF bot control in front of the site in
+# July 2026. It challenges datacentre IP ranges with an empty HTTP 202 — the
+# prod server first, then GitHub's runners. Real collection moved to a launchd
+# agent on George's Mac on 2026-08-07 (~/.statz/mv-scrape/), on a residential
+# connection, which is not what the WAF is aimed at.
 #
-# Left enabled and scheduled so it resumes on its own if the ranges are ever
-# unblocked. It now exits non-zero when blocked (it used to exit 0 and report
-# success), so a red run here means still-blocked, not newly-broken.
+# THE OUTCOME IS DELIBERATELY INVERTED, because GitHub emails on failure and
+# nobody needs a weekly note confirming a known block:
 #
-# Cadence: weekly, and only as a probe. Real collection moved to a launchd
-# agent on George's Mac on 2026-08-07 (~/.statz/mv-scrape/), which is on a
-# residential connection and therefore not challenged. That agent runs weekly,
-# daily through the transfer windows, because squad value is a weighted
-# component of the team rating behind the outrights page.
+#   green  = still blocked. The expected state. No email, no action.
+#   red    = the scrape got through, so the block has LIFTED and collection
+#            can move back off the laptop. That is the only news worth an
+#            email, and it is why the workflow name says so — the name is what
+#            appears in the notification subject.
+#
+# The inversion lives HERE, not in the script. scrape_market_values.py keeps
+# honest exit codes (non-zero when it scrapes nothing) because the Mac agent
+# runs the same script and depends on that.
+#
+# Safe to run green-when-blocked only because this is no longer the collector:
+# if market values genuinely go stale, the projections log digest says so
+# independently, and the Mac agent raises its own notification after 10 days
+# without a success.
 
 on:
   schedule:
-    # Weekly only. This no longer fetches the data — the Mac agent does — so
-    # its job is to answer one question: are GitHub's runners still blocked?
-    # A daily probe answered that six more times a week than anyone needed,
-    # at the cost of a failure email every morning. The day this goes green,
-    # the WAF has relaxed and the scrape can move back off the laptop.
     - cron: '43 5 * * 1'          # Mondays 05:43 UTC — odd minute, politer than :00
   workflow_dispatch:
 
 jobs:
-  scrape:
+  probe:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -40,6 +42,29 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests beautifulsoup4
-      - run: python scripts/scrape_market_values.py
+
+      - name: Attempt the scrape
+        id: scrape
+        continue-on-error: true
+        run: python scripts/scrape_market_values.py
         env:
           STATZ_INTERNAL_API_TOKEN: ${{ secrets.STATZ_INTERNAL_API_TOKEN }}
+
+      - name: Report — fail only if the block has lifted
+        run: |
+          if [ "${{ steps.scrape.outcome }}" = "success" ]; then
+            echo "::error::Transfermarkt is serving GitHub runners again."
+            echo ""
+            echo "The WAF block has lifted. Market values just landed from this"
+            echo "runner, so collection can move back off the Mac:"
+            echo ""
+            echo "  1. Re-enable the daily schedule in this workflow"
+            echo "     (weekly Mondays + daily through Jan/Jul/Aug windows)"
+            echo "  2. Unload the Mac agent:"
+            echo "     launchctl unload ~/Library/LaunchAgents/com.statz.mv-scrape.plist"
+            echo ""
+            echo "This step fails ON PURPOSE so the notification reaches you."
+            exit 1
+          fi
+          echo "Still challenged by the WAF — the expected state. Nothing to do."
+          echo "The Mac agent is collecting; see ~/.statz/mv-scrape/scrape.log."
