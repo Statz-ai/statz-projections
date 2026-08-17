@@ -150,6 +150,27 @@ async def cleanup_fpl_projections_async(gameweek_ids, keep_pairs):
                     (gw,),
                 )
                 existing = {(int(f), int(p)) for f, p in await cur.fetchall()}
+
+                # Only prune a gameweek this run actually produced rows for.
+                #
+                # The guard at the top of this function catches a run that
+                # wrote NOTHING. It does not catch a run that wrote SOME
+                # gameweeks and failed on the rest: `pairs` is a flat set
+                # across the whole horizon, so for an unwritten gameweek the
+                # diff below is every row it has, and all of them go. A run
+                # that died after GW1 would have wiped GW2-19 — nineteen
+                # gameweeks of projections, on a live page, with no guard
+                # firing because `pairs` was non-empty.
+                #
+                # A gameweek whose fixtures legitimately all vanished keeps its
+                # rows until the next good run. That is the safer failure.
+                gw_fixtures = {f for f, _ in existing}
+                if not any(f in gw_fixtures for f, _ in pairs):
+                    logger.info(f"[fpl_projections] gameweek {gw}: run produced no rows "
+                                f"for its fixtures — skipping cleanup rather than deleting "
+                                f"{len(existing)} existing rows")
+                    continue
+
                 stale = existing - pairs
                 if not stale:
                     continue
