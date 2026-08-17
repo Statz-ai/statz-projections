@@ -43,15 +43,25 @@ async def load_team_dials(competition_id: int) -> dict:
     try:
         conn = await get_connection()
         async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT team_id, attack_adjustment, defense_adjustment
-                FROM projections_team_dials
-                WHERE competition_id = %s
-                  AND (attack_adjustment != 0 OR defense_adjustment != 0)
-                """,
-                (int(competition_id),),
-            )
+            try:
+                await cur.execute(
+                    """
+                    SELECT team_id, attack_offset, defense_offset
+                    FROM projections_team_dials
+                    WHERE competition_id = %s
+                      AND (attack_offset != 0 OR defense_offset != 0)
+                    """,
+                    (int(competition_id),),
+                )
+            except Exception:
+                # Offset columns not migrated yet. Laravel and this service
+                # deploy separately, so during that window fall back to the
+                # old percentage columns and let the caller keep the previous
+                # behaviour rather than silently dropping every dial.
+                logger.warning(
+                    "projections_team_dials has no offset columns yet — "
+                    "falling back to the legacy percentage path")
+                return {}
             rows = await cur.fetchall()
         return {int(tid): (float(atk), float(dfn)) for tid, atk, dfn in rows}
     finally:
@@ -60,9 +70,31 @@ async def load_team_dials(competition_id: int) -> dict:
 
 
 async def apply_team_dials_to_ratings(ratings, competition_id, teams, league_label):
-    """Multiply Attack / Defence values on the ratings DataFrame by each
-    team's dialled percent (1 + pct/100). In-place mutation. Logs the
-    teams touched. Safe to call when no dials exist — early-returns.
+    """Apply each team's dialled OFFSET, in index points, to the ratings frame.
+
+    The dial used to be a percentage of the model rating, which meant the
+    operator's adjustment scaled with the model: push a team to 150 Attack,
+    they play badly, the model drops them, and a +14 opinion silently became
+    +12. An offset instead says "the model is under-rating them by 14" — the
+    team still moves on results, the disagreement stays the size it was set.
+
+    THE SOLVE. Offsets are expressed on the post-rescale index (mean = 100),
+    but this runs BEFORE the rescale — deliberately, so the dial also lands in
+    the xG-per-game snapshot the caller takes immediately after. So rather
+    than writing the target directly, write the raw value that COMES OUT as
+    the target once the caller rescales.
+
+    With raw values r, n teams, and dialled targets T_j:
+
+        index_j = 100 * X_j / mean(X)  ->  X_j = T_j * M / 100
+        M = (S + sum_j X_j) / n,  S = sum of un-dialled raw
+        =>  M = S / (n - sum_j T_j / 100)
+
+    Closed form, no iteration, and it holds for any number of dialled teams
+    at once. The league mean still comes out at 100, so every other team's
+    rating reads normally — which the old percentage path did not guarantee.
+
+    In-place mutation. Safe to call when no dials exist — early-returns.
 
     Caller provides:
       ratings — DataFrame with 'Team' and 'Attack'/'Defense' columns.
@@ -80,20 +112,64 @@ async def apply_team_dials_to_ratings(ratings, competition_id, teams, league_lab
         return
 
     id_to_name = teams.set_index('id')['name'].to_dict()
-    touched = []
-    for team_id, (atk_pct, def_pct) in dials.items():
+
+    # Resolve dials to row masks once, so a name that does not match is
+    # reported a single time rather than per column.
+    resolved = []
+    for team_id, (atk_off, def_off) in dials.items():
         team_name = id_to_name.get(int(team_id))
         if not team_name:
             logger.warning(f"[{league_label}] team_dial team_id={team_id} not in teams DataFrame — skipping")
             continue
-        mask = ratings['Team'] == team_name
-        if not mask.any():
+        if not (ratings['Team'] == team_name).any():
             logger.warning(f"[{league_label}] team_dial '{team_name}' not in ratings — skipping")
             continue
-        if atk_pct:
-            ratings.loc[mask, 'Attack'] = ratings.loc[mask, 'Attack'] * (1 + atk_pct / 100)
-        if def_pct:
-            ratings.loc[mask, 'Defense'] = ratings.loc[mask, 'Defense'] * (1 + def_pct / 100)
-        touched.append(f"{team_name}({atk_pct:+.1f}A/{def_pct:+.1f}D)")
+        resolved.append((team_name, float(atk_off), float(def_off)))
+
+    if not resolved:
+        return
+
+    n = len(ratings)
+    touched = []
+
+    for col, offset_index in (('Attack', 1), ('Defense', 2)):
+        raw = ratings[col].astype(float)
+        mean_raw = raw.mean()
+        if not mean_raw or mean_raw <= 0:
+            logger.warning(f"[{league_label}] team dials skipped for {col} — mean is not usable")
+            continue
+
+        # Target index for each dialled team = its model index + the offset.
+        targets = {}
+        for entry in resolved:
+            team_name, offset = entry[0], entry[offset_index]
+            if not offset:
+                continue
+            model_raw = float(raw[ratings['Team'] == team_name].iloc[0])
+            model_index = 100.0 * model_raw / mean_raw
+            targets[team_name] = model_index + offset
+
+        if not targets:
+            continue
+
+        dialled_names = set(targets)
+        undialled_sum = float(raw[~ratings['Team'].isin(dialled_names)].sum())
+        denominator = n - sum(targets.values()) / 100.0
+
+        # Degenerate only if the dialled targets are so large they consume the
+        # whole league mean — e.g. every team pinned far above 100. Leave the
+        # ratings untouched rather than produce a negative or exploded scale.
+        if denominator <= 1e-6:
+            logger.warning(
+                f"[{league_label}] team dials skipped for {col} — dialled targets "
+                f"({sum(targets.values()):.0f} across {len(targets)} teams) leave no "
+                f"room for the league mean")
+            continue
+
+        solved_mean = undialled_sum / denominator
+        for team_name, target in targets.items():
+            ratings.loc[ratings['Team'] == team_name, col] = target * solved_mean / 100.0
+            touched.append(f"{team_name} {col[:3]}->{target:.1f}")
+
     if touched:
         logger.info(f"[{league_label}] team dials applied: {', '.join(touched)}")
