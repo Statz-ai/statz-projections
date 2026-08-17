@@ -14,16 +14,20 @@ name: Transfermarkt market values
 # unblocked. It now exits non-zero when blocked (it used to exit 0 and report
 # success), so a red run here means still-blocked, not newly-broken.
 #
-# Cadence (George, 2026-07-30): squad value is now a weighted component of the
-# Team Strength rating behind the outrights page — 10% normally and 30% for
-# promoted sides — so it needs to track the transfer windows rather than drift
-# a week behind them. Daily through the summer and January windows, weekly the
-# rest of the year. Manual dispatch any time.
+# Cadence: weekly, and only as a probe. Real collection moved to a launchd
+# agent on George's Mac on 2026-08-07 (~/.statz/mv-scrape/), which is on a
+# residential connection and therefore not challenged. That agent runs weekly,
+# daily through the transfer windows, because squad value is a weighted
+# component of the team rating behind the outrights page.
 
 on:
   schedule:
+    # Weekly only. This no longer fetches the data — the Mac agent does — so
+    # its job is to answer one question: are GitHub's runners still blocked?
+    # A daily probe answered that six more times a week than anyone needed,
+    # at the cost of a failure email every morning. The day this goes green,
+    # the WAF has relaxed and the scrape can move back off the laptop.
     - cron: '43 5 * * 1'          # Mondays 05:43 UTC — odd minute, politer than :00
-    - cron: '43 5 * 1,7,8 *'      # daily in January, July and August (transfer windows)
   workflow_dispatch:
 
 jobs:
