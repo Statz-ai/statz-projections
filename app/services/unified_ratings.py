@@ -188,6 +188,63 @@ def blend_weights(matches_played, games_in_season, mv_pre=None):
     return w_form, w_mv, w_odds
 
 
+async def games_per_team(conn, competition_id, season_id, n_teams):
+    """How many games each team actually plays this season. Counted, not assumed.
+
+    Callers derive this as `(n_teams - 1) * 2`, which is exactly right for a
+    balanced double round-robin — everyone plays everyone home and away. That
+    covers most of what we project, which is why it survived unquestioned. It
+    is wrong for any other structure:
+
+        MLS                   30 teams, conference-based   34 games, not 58
+        Scottish Premiership  12 teams, triple + split     33 games, not 22
+
+    Both are wrong twice over: the strength divisor (MLS compressed 41%,
+    Scottish inflated 50%) and the season fraction that drives the MV fade,
+    the odds weight and the fixture-strength crossfade (MLS at 19 of 34 is
+    56% through but reads as 33%).
+
+    Returns None when the fixture list looks incomplete — a season part-way
+    through loading would otherwise report a short schedule, which reads as
+    "further through the season than we are" and fades the market component
+    early. Falling back to the caller's assumption is the safer failure.
+    """
+    if not competition_id or not season_id or not n_teams:
+        return None
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT team_id, COUNT(*) FROM (
+                    SELECT home_team_id AS team_id FROM fixtures
+                    WHERE competition_id = %s AND season_id = %s
+                    UNION ALL
+                    SELECT away_team_id FROM fixtures
+                    WHERE competition_id = %s AND season_id = %s
+                ) x
+                GROUP BY team_id
+                """,
+                (int(competition_id), int(season_id)) * 2,
+            )
+            rows = await cur.fetchall()
+    except Exception as err:
+        logger.warning("  games-per-team query failed (%s) — using caller's value", err)
+        return None
+
+    if len(rows) < 2:
+        return None
+    counts = [int(c) for _, c in rows]
+    # Mode, for the same reason matches_played uses it: a team with a fixture
+    # yet to be scheduled should not set the league's schedule length.
+    games = statistics.mode(counts)
+
+    # Sanity gate: at least a single round-robin's worth. Below that the
+    # fixture list is being loaded, not short.
+    if games < n_teams - 1:
+        return None
+    return int(games)
+
+
 # --- odds -> expected points ----------------------------------------------
 
 def _phi(x):
@@ -464,6 +521,16 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
     n_teams = len(ratings)
     if n_teams == 0:
         return ratings, pd.DataFrame()
+
+    # Count the schedule rather than trusting the caller's (n_teams-1)*2.
+    _counted = await games_per_team(conn, competition_id, season_id, n_teams)
+    if _counted and _counted != games_in_season:
+        logger.info("  schedule: %d games per team (counted), not %s (assumed) "
+                    "— season is %.0f%% gone, not %.0f%%",
+                    _counted, games_in_season,
+                    (matches_played or 0) / _counted * 100,
+                    (matches_played or 0) / games_in_season * 100 if games_in_season else 0)
+        games_in_season = _counted
 
     attack_mean = float(pd.to_numeric(ratings['Attack'], errors='coerce').mean())
     defence_mean = float(pd.to_numeric(ratings['Defense'], errors='coerce').mean())
