@@ -41,6 +41,7 @@ import numpy as np
 import pandas as pd
 
 from app.services import team_strength as ts
+from app.services.fixture_strengths import derive_fixture_strengths
 
 logger = logging.getLogger("projection")
 
@@ -243,6 +244,47 @@ async def games_per_team(conn, competition_id, season_id, n_teams):
     if games < n_teams - 1:
         return None
     return int(games)
+
+
+# --- fixture-derived market strengths --------------------------------------
+# Bookmaker knowledge reaches the rating through outright odds, which are
+# precise early and vague late: forward strength is (implied finish - banked)
+# / games remaining, so a fixed 2pt error on the implied finish is ~3% at
+# matchweek 5 and ~17% by matchweek 30. Match odds have no such decay — every
+# team is priced every week, all season.
+#
+# So the market component changes SOURCE over the season, never its weight.
+# A league's total market influence is identical before and after handover.
+#
+# ONE schedule for every league (George, 2026-08-18). An earlier draft ran a
+# later fade for deep-outright leagues (50%-65% of the season) on the grounds
+# that both sources were good there, and reserved the round 5-10 fade for thin
+# books. That distinction was dropped: it kept outright odds alive deep into
+# the season for exactly the leagues where the banked-points problem is worst,
+# and bought nothing the fixture-derived read does not already do better.
+#
+# Tied to round number rather than season fraction because the constraint is
+# identifiability, not calendar: below ~5 rounds the who-played-whom graph is
+# too sparse to separate teams, and by 10 rounds the fit is comfortable. That
+# holds whether a season is 30 games or 46.
+FIX_FADE_FROM_ROUND = 5
+FIX_FADE_TO_ROUND = 10
+
+
+def fixture_strength_weight(matches_played):
+    """Share of the market component taken from fixture odds rather than
+    outrights. 0.0 = outrights only, 1.0 = outrights gone.
+    """
+    try:
+        played = float(matches_played or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    lo, hi = float(FIX_FADE_FROM_ROUND), float(FIX_FADE_TO_ROUND)
+    if played <= lo:
+        return 0.0
+    if played >= hi:
+        return 1.0
+    return (played - lo) / (hi - lo)
 
 
 # --- odds -> expected points ----------------------------------------------
@@ -646,6 +688,57 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
         odds_overall = {k: v + shift for k, v in odds_overall.items()}
         logger.info("  partial odds anchored: shifted %+.1f onto the form+MV level "
                     "of the %d priced team(s)", shift, len(priced))
+    # Swap the market component's SOURCE from outrights to fixture odds on the
+    # schedule above. Runs after the partial anchoring so the outright side is
+    # already levelled before it is faded out.
+    w_fix = fixture_strength_weight(matches_played)
+    if w_fix > 0:
+        fix_raw = None
+        try:
+            fix_raw = await derive_fixture_strengths(
+                conn, competition_id, season_id, n_teams, now=now)
+        except Exception as err:
+            logger.warning("  fixture strengths errored (%s) — staying on outrights", err)
+        if fix_raw:
+            # Keyed by team id; the odds component is keyed by name.
+            by_id = {int(v): k for k, v in team_ids_by_name.items() if v is not None}
+            fix_overall = {by_id[t]: v for t, v in fix_raw.items() if t in by_id}
+            if fix_overall:
+                # Re-centre on zero, matching the outright path's convention of
+                # pivoting so the league's goal difference sums to zero. Only
+                # gaps between teams reach the rating, so sliding the whole
+                # column changes nothing — but it keeps the two sources
+                # commensurate while they are being mixed.
+                mu = sum(fix_overall.values()) / len(fix_overall)
+                fix_overall = {k: v - mu for k, v in fix_overall.items()}
+
+                merged, from_both, fix_only = {}, 0, 0
+                for name in set(odds_overall) | set(fix_overall):
+                    o_out = odds_overall.get(name)
+                    o_fix = fix_overall.get(name)
+                    if o_out is not None and o_fix is not None:
+                        merged[name] = (1.0 - w_fix) * o_out + w_fix * o_fix
+                        from_both += 1
+                    elif o_fix is not None:
+                        # The outright book never priced this team. Its
+                        # alternative is no market input at all — which is
+                        # exactly the thin-league problem — so take the
+                        # fixture read at full strength rather than fading in
+                        # from nothing.
+                        merged[name] = o_fix
+                        fix_only += 1
+                    else:
+                        merged[name] = o_out
+                odds_overall = merged
+                logger.info("  market source: %.0f%% fixture-derived / %.0f%% outright "
+                            "(round %s of %s) — %d team(s) blended, %d on fixture "
+                            "odds alone",
+                            w_fix * 100, (1 - w_fix) * 100,
+                            matches_played, games_in_season, from_both, fix_only)
+        elif fix_raw is None:
+            logger.info("  fixture strengths unavailable — staying on outrights "
+                        "(would have been %.0f%% of the market component)", w_fix * 100)
+
     logger.info("  unified weights: form %.2f / MV %.2f / odds %.2f (%s of %s matches played)",
                 w_form, w_mv, w_odds, matches_played, games_in_season)
 
