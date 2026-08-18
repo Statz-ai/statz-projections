@@ -492,7 +492,15 @@ async def load_team_stat_odds(conn, fixture_ids: list, market: str, books: list)
             if not teams:
                 continue
             home_tid, away_tid = teams
-            if team_id is None:
+            # Match-grain rows carry team_id = 0, NOT NULL. The column is
+            # `NOT NULL DEFAULT 0` — it was changed to a sentinel so the
+            # UNIQUE key would treat duplicate match-grain rows as equal
+            # (MySQL treats NULLs as distinct). This test still read `is
+            # None`, so every match-grain row fell through to the `continue`
+            # below and was silently dropped: 27,496 of 51,324 bet365 goals
+            # rows. Paths 1.5, 2 and 3 in _try_paths_for_bookie all need the
+            # match ladder, so all three were unreachable.
+            if team_id is None or int(team_id) == 0:
                 role = 'match'
             elif team_id == home_tid:
                 role = 'home'
