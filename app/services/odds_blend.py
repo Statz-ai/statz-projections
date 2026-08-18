@@ -310,25 +310,50 @@ def derive_bookie_lambdas(
         'home':   list[(line, over, under)]    # team_id = home_team_id
         'away':   list[(line, over, under)]    # team_id = away_team_id
 
-    Order of fallback through bookmakers controlled by GOALS_BOOKIE_PRIORITY.
+    Selection is PATH-first, book priority only as a tiebreak. This used to
+    loop books in GOALS_BOOKIE_PRIORITY order and take the first one that
+    returned anything, which meant a higher-priority book holding only a
+    match total (path 2) beat a lower-priority book holding both per-team
+    ladders (path 1) — we threw away the better read to honour the book
+    ordering. Measured on 1,176 upcoming fixtures: 13 of the 314 priced took
+    a weaker path than was available, every one of them Coral outranking
+    BoyleSports on thinner data.
+
+    So: find the strongest path any book can support, and among books that
+    reach that path, keep the highest-priority one (bet365 first, per house
+    rule). Short-circuits as soon as a book reaches path 1, which is the
+    common case and cannot be beaten.
     """
+    best_rank, best_result = None, None
     for bookie in GOALS_BOOKIE_PRIORITY:
-        result = _try_paths_for_bookie(
+        got = _rank_and_lambdas(
             goals_odds.get(bookie, {}),
             lambda_h_model, lambda_a_model,
             bookie_1x2,
         )
-        if result is not None:
-            return result
-    return None
+        if got is None:
+            continue
+        rank, result = got
+        # Strict <, so an earlier book wins a tie on equal path strength.
+        if best_rank is None or rank < best_rank:
+            best_rank, best_result = rank, result
+            if best_rank == 1:
+                break
+    return best_result
 
 
-def _try_paths_for_bookie(
+def _rank_and_lambdas(
     bookie_data: dict,
     lambda_h_model: float,
     lambda_a_model: float,
     bookie_1x2: Optional[Tuple[float, float, float]],
-) -> Optional[Tuple[float, float]]:
+) -> Optional[Tuple[int, Tuple[float, float]]]:
+    """(rank, (λ_h, λ_a)) for one book, or None if it has no usable ladder.
+
+    Rank orders the paths by how much the market — rather than our own model
+    — determines the home/away split. 1 is strongest. The caller compares
+    ranks ACROSS books, so this must not itself fall back to another book.
+    """
     home_ladder = bookie_data.get('home', [])
     away_ladder = bookie_data.get('away', [])
     match_ladder = bookie_data.get('match', [])
@@ -337,27 +362,30 @@ def _try_paths_for_bookie(
     lambda_a_bookie = fit_lambda_from_ladder(away_ladder)
     lambda_total_bookie = fit_lambda_from_ladder(match_ladder)
 
-    # PATH 1 — both per-team ladders
+    # PATH 1 — both per-team ladders. Each side priced by its own market;
+    # nothing inferred. Cannot be improved on, so rank 1.
     if lambda_h_bookie is not None and lambda_a_bookie is not None:
-        return lambda_h_bookie, lambda_a_bookie
+        return 1, (lambda_h_bookie, lambda_a_bookie)
 
     # PATH 1.5 — single per-team + match total → derive missing side
     if lambda_h_bookie is not None and lambda_total_bookie is not None:
-        return lambda_h_bookie, max(0.05, lambda_total_bookie - lambda_h_bookie)
+        return 2, (lambda_h_bookie, max(0.05, lambda_total_bookie - lambda_h_bookie))
     if lambda_a_bookie is not None and lambda_total_bookie is not None:
-        return max(0.05, lambda_total_bookie - lambda_a_bookie), lambda_a_bookie
+        return 2, (max(0.05, lambda_total_bookie - lambda_a_bookie), lambda_a_bookie)
 
     # PATH 2 — match total + 1X2 → reverse-solve share
     if lambda_total_bookie is not None and bookie_1x2 is not None:
         p_h, p_d, p_a = bookie_1x2
         share = reverse_solve_share(lambda_total_bookie, p_h, p_d, p_a)
-        return lambda_total_bookie * share, lambda_total_bookie * (1.0 - share)
+        return 3, (lambda_total_bookie * share, lambda_total_bookie * (1.0 - share))
 
     # PATH 3 — match total only → split via model ratio
     if lambda_total_bookie is not None:
         denom = lambda_h_model + lambda_a_model
         share = (lambda_h_model / denom) if denom > 0 else 0.5
-        return lambda_total_bookie * share, lambda_total_bookie * (1.0 - share)
+        # Rank 4: the split is OUR model's, not the market's. Weakest path,
+        # so any book reaching rank 3 or better is preferred over this.
+        return 4, (lambda_total_bookie * share, lambda_total_bookie * (1.0 - share))
 
     # No goals-ladder data → caller falls back to its own 1X2-only path
     return None
@@ -531,51 +559,58 @@ def derive_team_stat_lambdas(
 ) -> Optional[Tuple[float, float]]:
     """Cascade for team-stat (corners, cards, shots etc.) lambdas.
 
-    Per priority book: try per-team ladders first (full or partial),
-    then match-total split via model ratio. First book that returns a
-    usable result wins.
+    Selection is PATH-first, book priority only as a tiebreak — the same rule
+    as derive_bookie_lambdas. This used to return on the first book in
+    books_priority that produced anything, so a higher-priority book holding
+    only a match total (path 2, where the home/away split comes from OUR
+    model) beat a lower-priority book holding both per-team ladders (path 1,
+    where each side is priced by its own market). That threw away the better
+    read to honour the book ordering.
 
-    No 1X2 analog for team stats — cascade is shorter than goals:
-      Path 1   per-team ladders (both teams)     → fit each side
-      Path 1.5 one per-team + match total        → derive missing side
-      Path 2   match total only                  → split via model ratio
-      Path 3   nothing for this book             → fall through to next
+    No 1X2 analog for team stats — there is no result market for corners — so
+    the cascade is one rung shorter than goals:
+      rank 1   per-team ladders (both teams)     → fit each side
+      rank 2   one per-team + match total        → derive missing side
+      rank 3   match total only                  → split via model ratio
 
     Returns (lambda_home_bookie, lambda_away_bookie) or None.
     """
-    for book in books_priority:
-        book_data = odds_for_fixture.get(book, {})
-        if not book_data:
-            continue
+    def rank_for(book_data):
+        """(rank, (λ_h, λ_a)) for one book, or None. Must not fall through to
+        another book — the caller compares ranks across books."""
+        lam_h = fit_lambda_from_ladder(book_data.get('home', []))
+        lam_a = fit_lambda_from_ladder(book_data.get('away', []))
+        lam_t = fit_lambda_from_ladder(book_data.get('match', []))
 
-        home_ladder = book_data.get('home', [])
-        away_ladder = book_data.get('away', [])
-        match_ladder = book_data.get('match', [])
-
-        lam_h = fit_lambda_from_ladder(home_ladder)
-        lam_a = fit_lambda_from_ladder(away_ladder)
-        lam_t = fit_lambda_from_ladder(match_ladder)
-
-        # Path 1 — both per-team ladders
         if lam_h is not None and lam_a is not None:
-            return lam_h, lam_a
-
-        # Path 1.5 — one per-team + match total
+            return 1, (lam_h, lam_a)
         if lam_h is not None and lam_t is not None:
-            return lam_h, max(0.01, lam_t - lam_h)
+            return 2, (lam_h, max(0.01, lam_t - lam_h))
         if lam_a is not None and lam_t is not None:
-            return max(0.01, lam_t - lam_a), lam_a
-
-        # Path 2 — match total only, split by model ratio
+            return 2, (max(0.01, lam_t - lam_a), lam_a)
         if lam_t is not None:
             denom = model_home + model_away
             if denom > 0:
                 share = model_home / denom
-                return lam_t * share, lam_t * (1.0 - share)
+                return 3, (lam_t * share, lam_t * (1.0 - share))
+        return None
 
-        # This book has nothing usable — fall through.
+    best_rank, best_result = None, None
+    for book in books_priority:
+        book_data = odds_for_fixture.get(book, {})
+        if not book_data:
+            continue
+        got = rank_for(book_data)
+        if got is None:
+            continue
+        rank, result = got
+        # Strict <, so an earlier book wins a tie on equal path strength.
+        if best_rank is None or rank < best_rank:
+            best_rank, best_result = rank, result
+            if best_rank == 1:
+                break
 
-    return None
+    return best_result
 
 
 def blend_team_stat(
