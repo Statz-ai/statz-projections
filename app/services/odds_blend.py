@@ -813,6 +813,23 @@ def compute_final_goals_and_probs(
     odds_weight: per-service blend weight (0.3 domestic/WC, 0.5 euro comp).
     boost: draw-bias multiplier (1.1 across all services today).
     """
+    # Zero weight means the caller wants no market influence on GOALS at all
+    # — the outright odds are already inside the team rating and applying
+    # bookie lambdas here would count the same view twice.
+    #
+    # Short-circuited rather than left to fall through with w=0, because the
+    # legacy 1X2 path would still round-trip lambda through
+    # find_inputs_for_probs, and that solver is measurably lossy: on the flat
+    # boost it recovers 1.5753/1.2438 from a true 1.5900/1.2700. Zero has to
+    # mean exactly the model, not the model plus solver error.
+    #
+    # The H/D/A still come from get_result_probs so downstream percentages
+    # keep their usual shape, including any Dixon-Coles correction.
+    if not odds_weight:
+        from app.services.statz_functions import get_result_probs
+        h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost, rho)
+        return lambda_h_model, lambda_a_model, h, d, a
+
     # Try the new cascade first.
     bookie_lambdas = derive_bookie_lambdas(
         fixture_id, lambda_h_model, lambda_a_model,

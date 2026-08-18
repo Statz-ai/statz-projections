@@ -850,6 +850,17 @@ class ProjectionService:
                     goals_per_game=_uni_gpg,
                     mv_weight_pre=mv_beta,
                 )
+
+                # Did the rating actually take an outright-odds component this
+                # run? Drives the goals-blend suppression below: the market
+                # should reach a fixture ONCE, and if it is already inside the
+                # rating then blending bookie lambdas again at the goals step
+                # applies it twice.
+                try:
+                    _n_odds = int(_uni_audit['odds'].notna().sum()) if _uni_audit is not None and not _uni_audit.empty else 0
+                except Exception:
+                    _n_odds = 0
+                ProjectionService._strength_inputs['rating_used_odds'] = _n_odds > 0
             finally:
                 release_source_connection(_uni_conn)
             logger.info(f"[{league}] Step: unified rating applied")
@@ -1071,6 +1082,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -1123,7 +1152,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3086,6 +3115,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3138,7 +3185,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3291,6 +3338,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3345,7 +3410,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3682,6 +3747,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3734,7 +3817,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -4373,6 +4456,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -4425,7 +4526,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -5284,6 +5385,24 @@ class ProjectionService:
         # configured; get_result_probs applies one or the other, never both.
         dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
         boost = 1.0 if dixon_coles_rho else 1.1
+
+        # Market content must reach a fixture ONCE. Where the unified rating
+        # already took an outright-odds component, blending bookie lambdas
+        # again at the goals step applies the same view twice — the rating
+        # says a team is strong BECAUSE the book does, then the fixture is
+        # dragged toward the book on top of that.
+        #
+        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
+        # also drives the team-stat blend (corners/cards/shots) and the whole
+        # player-prop ladder, which take their odds from markets the rating
+        # never saw and must keep blending. Only the goals step is a repeat.
+        #
+        # Leagues whose rating got no odds component keep the fixture blend
+        # exactly as before, so this is per-league and self-selecting.
+        _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
+        if _rating_used_odds:
+            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -5336,7 +5455,7 @@ class ProjectionService:
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    odds_beta,
+                    goals_odds_weight,
                     boost,
                     dixon_coles_rho,
                 )
