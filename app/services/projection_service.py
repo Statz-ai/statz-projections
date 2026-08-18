@@ -327,6 +327,10 @@ class ProjectionService:
             ctx.div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
             ctx.mv_beta = float(r.get('mv_beta', unified_ratings.W_MV_PRE))
             ctx.odds_beta = float(r.get('odds_beta', 0.3))
+            # Dixon-Coles rho. NULL means the competition keeps the flat draw
+            # boost, so this rolls out league by league rather than at once.
+            _rho = r.get('dixon_coles_rho')
+            ctx.dixon_coles_rho = float(_rho) if pd.notna(_rho) else 0.0
             ctx.fpl = (league == 'Premier League')  # FPL is always PL-only
             logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
         else:
@@ -352,6 +356,7 @@ class ProjectionService:
                 ctx.div = league_row['div'].values[0]
                 ctx.mv_beta = league_row['mv_beta'].values[0]
                 ctx.odds_beta = league_row['odds_beta'].values[0]
+                ctx.dixon_coles_rho = 0.0   # xlsx fallback has no rho column
                 logger.info(f"[{league}] Config loaded from League Weightings.xlsx (fallback)")
             else:
                 ctx.league_below = None
@@ -368,6 +373,7 @@ class ProjectionService:
                 # it would mean "ignore squad value entirely".
                 ctx.mv_beta = unified_ratings.W_MV_PRE
                 ctx.odds_beta = 1.0
+                ctx.dixon_coles_rho = 0.0
                 logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
 
             ctx.fpl = (league == 'Premier League')
@@ -1061,7 +1067,10 @@ class ProjectionService:
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         logger.info(f"[{league}] Fixtures predicted ({time.time()-_t:.1f}s)")
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -1116,6 +1125,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3072,7 +3082,10 @@ class ProjectionService:
         # debug prints removed
 
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3127,6 +3140,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3273,7 +3287,10 @@ class ProjectionService:
         avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3330,6 +3347,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3660,7 +3678,10 @@ class ProjectionService:
         avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3715,6 +3736,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -4347,7 +4369,10 @@ class ProjectionService:
         avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -4402,6 +4427,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -5254,7 +5280,10 @@ class ProjectionService:
         avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
-        boost = 1.1  # NEW - Set draw boost to fixed value
+        # Dixon-Coles replaces the flat draw boost where a league has rho
+        # configured; get_result_probs applies one or the other, never both.
+        dixon_coles_rho = getattr(ctx, 'dixon_coles_rho', 0.0) or 0.0
+        boost = 1.0 if dixon_coles_rho else 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -5309,6 +5338,7 @@ class ProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_beta,
                     boost,
+                    dixon_coles_rho,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)

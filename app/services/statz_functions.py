@@ -955,16 +955,69 @@ def get_draw_boost(ratings, average_home_goals, average_away_goals, draw_perc):
     return np.clip(draw_boost, 1, 1.1)  # NEW
 
 
-def get_result_probs(home_goals: object, away_goals: object, boost: object) -> tuple[Any, Any, Any]:
+def apply_dixon_coles(Z, home_goals, away_goals, rho):
+    """Dixon-Coles low-score correction, applied in place to a Poisson grid.
+
+    Independent Poisson misprices the four lowest scorelines because those
+    outcomes are not independent in real football. Dixon-Coles (1997) corrects
+    exactly those cells with one parameter per league:
+
+        tau(0,0) = 1 - lambda*mu*rho      tau(0,1) = 1 + lambda*rho
+        tau(1,0) = 1 + mu*rho             tau(1,1) = 1 - rho
+
+    Z is indexed [away][home] — numpy's meshgrid default puts the home axis on
+    the columns — so Z[1][0] is the 0-1 scoreline and Z[0][1] is 1-0. Getting
+    that backwards silently swaps the home and away corrections, which is why
+    it is spelled out here rather than left to the reader.
+
+    rho = 0 leaves the grid untouched, so an unconfigured league costs nothing.
+    """
+    if not rho:
+        return Z
+    Z[0][0] = Z[0][0] * (1 - home_goals * away_goals * rho)
+    Z[1][0] = Z[1][0] * (1 + home_goals * rho)
+    Z[0][1] = Z[0][1] * (1 + away_goals * rho)
+    Z[1][1] = Z[1][1] * (1 - rho)
+    return Z
+
+
+def get_result_probs(home_goals: object, away_goals: object, boost: object = 1.0,
+                     rho: float = 0.0) -> tuple[Any, Any, Any]:
+    """1X2 probabilities from a Poisson scoreline grid.
+
+    Two mutually exclusive ways of handling draws, selected per competition:
+
+      rho != 0   Dixon-Coles. Corrects the four low-score cells individually.
+                 The competition's dixon_coles_rho, set in
+                 competition_projection_config.
+      boost != 1 the legacy flat multiplier on the WHOLE draw diagonal, with
+                 home/away renormalised to fill what is left. Still the path
+                 for competitions with no rho configured, and for the euro and
+                 international services which run their own pipelines.
+
+    Passing both would apply the correction twice over, so callers set one and
+    leave the other at its neutral default.
+    """
     import numpy as np
     from scipy.stats import poisson
     x = np.arange(0, 9)
     y = np.arange(0, 9)
     X, Y = np.meshgrid(x, y)
     Z = poisson.pmf(X, home_goals) * poisson.pmf(Y, away_goals)
+    Z = apply_dixon_coles(Z, home_goals, away_goals, rho)
     home_win_prob = np.sum(np.triu(Z, k=1))
     draw_prob = np.sum(np.diag(Z))
     away_win_prob = np.sum(np.tril(Z, k=-1))
+    if rho:
+        # Dixon-Coles has already shaped the draws; the flat boost would be a
+        # second, cruder correction on top. Renormalise instead, since the tau
+        # weights leave the grid summing slightly off 1.
+        _total = home_win_prob + draw_prob + away_win_prob
+        if _total > 0:
+            home_win_prob /= _total
+            draw_prob /= _total
+            away_win_prob /= _total
+        return round(home_win_prob * 100, 2), round(draw_prob * 100, 2), round(away_win_prob * 100, 2)
     draw_prob = draw_prob * boost
     remaining_prob = 1 - draw_prob
     original_home_probs = home_win_prob
@@ -974,7 +1027,16 @@ def get_result_probs(home_goals: object, away_goals: object, boost: object) -> t
     return round(home_win_prob * 100, 2), round(draw_prob * 100, 2), round(away_win_prob * 100, 2)
 
 
-def find_inputs_for_probs(home_start, away_start, target_home, target_draw, target_away, boost=1.1):
+def find_inputs_for_probs(home_start, away_start, target_home, target_draw, target_away,
+                          boost=1.1, rho=0.0):
+    """Solve for the home/away goal rates that reproduce a target 1X2.
+
+    MUST mirror get_result_probs exactly. It is the inverse of that function —
+    the odds blend uses it to convert bookmaker prices back into goal rates —
+    so if one applies Dixon-Coles and the other does not, the blend solves
+    against a different model than it prices and pulls every fixture toward a
+    number the projection never produces.
+    """
     from scipy.optimize import minimize
     import numpy as np
     from scipy.stats import poisson
@@ -984,7 +1046,19 @@ def find_inputs_for_probs(home_start, away_start, target_home, target_draw, targ
         y_vals = np.arange(0, 9)
         X, Y = np.meshgrid(x_vals, y_vals)
         Z = poisson.pmf(X, home_goals) * poisson.pmf(Y, away_goals)
+        Z = apply_dixon_coles(Z, home_goals, away_goals, rho)
         home_win_prob = np.sum(np.triu(Z, k=1))
+        if rho:
+            draw_prob = np.sum(np.diag(Z))
+            away_win_prob = np.sum(np.tril(Z, k=-1))
+            _total = home_win_prob + draw_prob + away_win_prob
+            if _total > 0:
+                home_win_prob /= _total
+                draw_prob /= _total
+                away_win_prob /= _total
+            return ((home_win_prob - target_home / 100) ** 2
+                    + (draw_prob - target_draw / 100) ** 2
+                    + (away_win_prob - target_away / 100) ** 2)
         draw_prob = np.sum(np.diag(Z)) * boost
         away_win_prob = np.sum(np.tril(Z, k=-1))
         remaining_prob = 1 - draw_prob

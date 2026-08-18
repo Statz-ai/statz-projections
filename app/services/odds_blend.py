@@ -794,6 +794,7 @@ def compute_final_goals_and_probs(
     goals_odds: dict,
     odds_weight: float,
     boost: float,
+    rho: float = 0.0,
 ) -> Tuple[float, float, float, float, float]:
     """Single entry point for the goal-blend logic across all 3 services.
 
@@ -827,8 +828,14 @@ def compute_final_goals_and_probs(
         # Compute final H/D/A from the blended λs so they're internally
         # consistent with the output goals.
         ph, pd_, pa = _hda_from_lambdas(new_h, new_a)
-        # Apply the same draw-boost shape used by get_result_probs so
-        # downstream percentages match what every other path emits.
+        # Apply the same draw shaping get_result_probs uses, so every path
+        # emits consistent percentages. With Dixon-Coles configured the grid
+        # has already been corrected cell by cell, so the flat boost must NOT
+        # be layered on top — recompute from the corrected grid instead.
+        if rho:
+            from app.services.statz_functions import get_result_probs
+            ph_pct, pd_pct, pa_pct = get_result_probs(new_h, new_a, 1.0, rho)
+            return new_h, new_a, ph_pct, pd_pct, pa_pct
         pd_boosted = pd_ * boost
         remaining = 1.0 - pd_boosted
         if (ph + pa) > 0:
@@ -844,7 +851,7 @@ def compute_final_goals_and_probs(
     if bookie_1x2_pct is None:
         # PATH 5 — no odds at all. Use model unchanged; emit model H/D/A.
         from app.services.statz_functions import get_result_probs
-        h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost)
+        h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost, rho)
         return lambda_h_model, lambda_a_model, h, d, a
 
     from app.services.statz_functions import get_result_probs, find_inputs_for_probs
@@ -852,7 +859,7 @@ def compute_final_goals_and_probs(
     bookie_h_pct, bookie_d_pct, bookie_a_pct = p_h * 100, p_d * 100, p_a * 100
 
     model_h_pct, model_d_pct, model_a_pct = get_result_probs(
-        lambda_h_model, lambda_a_model, boost,
+        lambda_h_model, lambda_a_model, boost, rho,
     )
 
     adj_h = model_h_pct + (bookie_h_pct - model_h_pct) * odds_weight
@@ -861,6 +868,6 @@ def compute_final_goals_and_probs(
 
     new_h, new_a = find_inputs_for_probs(
         lambda_h_model, lambda_a_model,
-        adj_h, adj_d, adj_a, boost,
+        adj_h, adj_d, adj_a, boost, rho,
     )
     return float(new_h), float(new_a), adj_h, adj_d, adj_a
