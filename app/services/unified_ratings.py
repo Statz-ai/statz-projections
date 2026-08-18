@@ -689,6 +689,21 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
         ratings[col] = ratings[col].clip(lower=RATING_FLOOR_FRACTION * mean_val)
 
     audit_df = pd.DataFrame(audit)
+
+    # Log the per-team breakdown. The components are already computed and were
+    # being discarded, so this costs nothing and makes every rating movement
+    # explainable after the fact — "why did Tottenham drop 9 points" should be
+    # answerable from the log rather than by re-deriving each input by hand.
+    if not audit_df.empty:
+        logger.info("  unified breakdown (index points, blended = what the rating becomes):")
+        logger.info("    %-26s %8s %8s %8s %10s %8s",
+                    "TEAM", "FORM", "MV", "ODDS", "BLENDED", "DELTA")
+        for _row in audit_df.sort_values('blended', ascending=False).itertuples():
+            logger.info("    %-26s %8.1f %8s %8s %10.1f %+8.1f",
+                        str(_row.Team)[:26], _row.form,
+                        ("%.1f" % _row.mv) if _row.mv is not None else "-",
+                        ("%.1f" % _row.odds) if _row.odds is not None else "-",
+                        _row.blended, _row.delta)
     n_mv = int(audit_df['mv'].notna().sum()) if not audit_df.empty else 0
     n_odds = int(audit_df['odds'].notna().sum()) if not audit_df.empty else 0
     logger.info("  unified blend applied to %d teams (MV for %d, odds for %d)",
