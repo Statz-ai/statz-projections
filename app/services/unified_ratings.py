@@ -246,6 +246,49 @@ async def games_per_team(conn, competition_id, season_id, n_teams):
     return int(games)
 
 
+async def forward_points_per_game(conn, season_id, games_in_season):
+    """{team_id: (banked_points, games_remaining)}, or None if unusable.
+
+    Outright prices imply a team's FINAL points, which is banked + expected
+    remaining. Subtracting the league pivot removes the average level but
+    leaves each team's own banked surplus inside its strength — and the rating
+    already has a form component measured from matches played, so a team's
+    start was counted twice.
+
+    Measured on Allsvenskan at round 17 (2026-08-18): Sirius banked 42 points
+    from 17 games and read +34.2, the strongest team in the league, while the
+    market expected only 2.00 points per game from them against a league mean
+    of 1.72. AIK read +6.4 while the market had them BELOW average from there.
+    Removing banked points tracked the fixture-odds-derived read better across
+    the whole league: +0.923 against +0.892.
+
+    Returns None when standings are unusable, so the caller falls back to the
+    season-total measure rather than losing its odds component.
+    """
+    if not season_id or not games_in_season:
+        return None
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT team_id, points, played FROM standings WHERE season_id = %s",
+                (int(season_id),),
+            )
+            rows = await cur.fetchall()
+    except Exception as err:
+        logger.warning("  forward points: standings query failed (%s)", err)
+        return None
+
+    out = {}
+    for team_id, points, played in rows:
+        if team_id is None:
+            continue
+        remaining = int(games_in_season) - int(played or 0)
+        if remaining <= 0:
+            continue
+        out[int(team_id)] = (float(points or 0), remaining)
+    return out or None
+
+
 # --- fixture-derived market strengths --------------------------------------
 # Bookmaker knowledge reaches the rating through outright odds, which are
 # precise early and vague late: forward strength is (implied finish - banked)
@@ -608,7 +651,7 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
                             "none clearing the %.1f%% floor",
                             n_markets, PARTIAL_ODDS_MIN_PROB * 100)
             else:
-                n_games = max(1, (n_teams - 1) * 2)
+                n_games = max(1, games_in_season)
                 for name, team_id in team_ids_by_name.items():
                     if team_id is None:
                         continue
@@ -625,20 +668,52 @@ async def apply_unified_ratings(conn, ratings, *, competition_id, season_id,
         else:
             logger.info("  league constants from %d seasons: mean pts %.1f, GD per point %.3f",
                         n_seasons, mean_points, gd_per_point)
-            n_games = max(1, (n_teams - 1) * 2)
+            n_games = max(1, games_in_season)
+
+            # Forward strength: what the market expects from HERE, rather than
+            # what it expects a team to finish on. See forward_points_per_game.
+            _fwd = await forward_points_per_game(conn, season_id, n_games)
+            fwd_rates, mean_fwd = {}, None
+            if _fwd:
+                for name, team_id in team_ids_by_name.items():
+                    if team_id is None:
+                        continue
+                    pts = points.get(int(team_id))
+                    entry = _fwd.get(int(team_id))
+                    if pts is None or entry is None:
+                        continue
+                    banked, remaining = entry
+                    fwd_rates[name] = (pts - banked) / remaining
+                if fwd_rates:
+                    mean_fwd = sum(fwd_rates.values()) / len(fwd_rates)
+
             for name, team_id in team_ids_by_name.items():
                 if team_id is None:
                     continue
                 pts = points.get(int(team_id))
                 if pts is None:
                     continue
-                # Pivot on the FITTED mean so the league's goal difference
-                # sums to zero by construction. Only gaps reach the rating,
-                # so sliding the whole column changes nothing.
-                gd_per_match = (pts - pivot) * gd_per_point / n_games
+                if mean_fwd is not None and name in fwd_rates:
+                    # Already a per-game rate, so no division by season length.
+                    # Compared against the league's own forward mean, which
+                    # plays the role the pivot did — only gaps reach the rating.
+                    # At round 0 banked is 0 and every team has the full season
+                    # left, so this reduces exactly to the season-total measure
+                    # below: no separate early-season path needed.
+                    gd_per_match = (fwd_rates[name] - mean_fwd) * gd_per_point
+                else:
+                    # Pivot on the FITTED mean so the league's goal difference
+                    # sums to zero by construction. Only gaps reach the rating,
+                    # so sliding the whole column changes nothing.
+                    gd_per_match = (pts - pivot) * gd_per_point / n_games
                 # Half the goal difference to each end, then express as
                 # index points above average — the same units as form.
                 odds_overall[name] = (gd_per_match / 2.0) / goals_per_game * 100.0
+
+            if mean_fwd is not None:
+                logger.info("  odds component forward-looking: market expects %.2f "
+                            "pts/game from here (league mean), %d of %d teams",
+                            mean_fwd, len(fwd_rates), len(team_ids_by_name))
 
     # Squad value: a z-score, soft-capped, sized by the form frame's spread.
     mv_overall = {}
