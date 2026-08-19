@@ -9,11 +9,11 @@ from app.services.fpl_bps import PENALTY_CONVERSION_RATE
 _PROJ_LOGGER = logging.getLogger("projection")
 
 # --- form decay ------------------------------------------------------------
-# 'power' (default): (age_weeks + 4) ** -0.418, anchored to TODAY.
+# 'power' (default): (age_weeks + 4) ** -0.6, anchored to TODAY.
 # 'exp'   the original: weight ** (weeks since the TEAM'S LAST GAME - 3),
 #         flat inside 4 weeks. Kept as an escape hatch — set FORM_DECAY=exp.
 FORM_DECAY_MODE = os.getenv("FORM_DECAY", "power")
-FORM_DECAY_K = float(os.getenv("FORM_DECAY_K", "0.418"))
+FORM_DECAY_K = float(os.getenv("FORM_DECAY_K", "0.6"))
 FORM_DECAY_OFFSET = float(os.getenv("FORM_DECAY_OFFSET", "4.0"))
 
 # Sportmonks pre-creates knockout-final fixture rows with placeholder team
