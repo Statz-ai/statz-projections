@@ -102,12 +102,36 @@ async def upsert_run_complete(
             row = await cursor.fetchone()
             if row:
                 run_id = row[0]
+                # started_at is rewritten from OUR clock, not left as Laravel
+                # wrote it, so both ends of the duration come from one writer.
+                #
+                # These are TIMESTAMP columns, so MySQL converts using the
+                # SESSION timezone — and the two sides disagree. This service
+                # pins its session to UTC; Laravel leaves it at SYSTEM, which
+                # is BST half the year. A row created by Laravel at start and
+                # finished by us therefore had one end shifted and the other
+                # not, adding exactly 60 minutes to every scheduled run.
+                #
+                # It made run-duration monitoring useless: every league read
+                # as 61-64 minutes regardless of size, with near-zero variance
+                # (Bundesliga 61/61/61), because that was an offset and not a
+                # duration. League One's failed run on 2026-08-18 looked like
+                # 65 minutes and was really about 5. A genuinely slow run
+                # would have been invisible in that noise.
+                #
+                # Not fixed by aligning the session timezones: Laravel writes
+                # UTC values over a BST session, so its timestamps round-trip
+                # correctly while being stored an hour early. Changing that
+                # shifts every historical created_at in the whole app, and the
+                # skew disappears by itself when the box returns to GMT.
+                # Owning both ends here costs nothing and needs no migration.
                 await cursor.execute(
                     "UPDATE projections_runs SET "
-                    "status = %s, finished_at = %s, exit_code = %s, "
+                    "status = %s, started_at = %s, finished_at = %s, "
+                    "exit_code = %s, "
                     "stdout_snippet = %s, stderr_snippet = %s "
                     "WHERE id = %s",
-                    (status, finished_at_dt, exit_code,
+                    (status, started_at_dt, finished_at_dt, exit_code,
                      stdout_snippet, stderr_snippet, run_id),
                 )
                 await conn.commit()
