@@ -746,48 +746,140 @@ def get_market_value(league_dashed, div, country_code):
     return df
 
 
-def get_home_goal_avg(league_id, team_stats, fixtures, stats_types):
+# --- league goal averages --------------------------------------------------
+# Rewritten 2026-08-19. The previous version had four problems, in descending
+# order of how much they moved the numbers:
+#
+# 1. 0-0 fixtures were silently dropped. Goals came from the `Goals` team-stat
+#    row, and Sportmonks omits that row when a side fails to score -- 24.6% of
+#    zero-scoring team-sides had no row, every non-zero score had one. The
+#    merge was `how='inner'`, so a goalless match left neither the numerator
+#    NOR the denominator. The average was therefore over "matches where
+#    somebody scored", inflating every league by 4-10%. Goals now come from
+#    the scoreboard columns, which are complete and include own goals.
+#    (`get_team_stats` already right-joined + fillna(0) for exactly this
+#    reason; it was never applied here.)
+#
+# 2. `0.9 ** (weeks - 5)` collapsed the effective sample to ~150 matches out of
+#    1100+, so a league's level was really "whatever the last few months were".
+#    Measured: Bundesliga read 0.18 goals/game high, Championship 0.12 high,
+#    Premier League 0.04 low -- noise, not bias. On the home/away ratio the
+#    same concentration put La Liga at 1.52 against a true 1.33, which is what
+#    made Real Madrid and Barcelona project so low. Now a power curve, which
+#    is near-flat across a long gap and only steepens for recent matches.
+#
+# 3. The two halves of the blend spanned different fixture sets, because the
+#    goals half used every fixture and the xG half only those with xG (77% in
+#    the big five, and the missing quarter is almost entirely 2023/24). One
+#    pool now, so a fixture contributes to both halves or neither.
+#
+# 4. No window at all -- 26% of the weight sat on matches over two years old.
+#
+# LEVEL and RATIO are estimated separately because they want different
+# treatment. The level tracks a real scoring-rate shift, so it gets a faster
+# curve and a window. The home/away ratio has no season-to-season trend in any
+# league we carry (Premier League went 1.217 -> 1.065 -> 1.247 with no
+# direction), so chasing it just chases noise -- slower curve, no window.
+# The two are then recombined into the home and away averages the callers
+# expect. Signed off by George 2026-08-19 with the per-league impact measured.
+LEVEL_K = float(os.getenv("GOAL_AVG_LEVEL_K", "1.0"))
+LEVEL_WINDOW_WEEKS = float(os.getenv("GOAL_AVG_LEVEL_WINDOW_WEEKS", "104"))
+RATIO_K = float(os.getenv("GOAL_AVG_RATIO_K", "0.4"))
+XG_WEIGHT = float(os.getenv("GOAL_AVG_XG_WEIGHT", "0.5"))
+DECAY_OFFSET = float(os.getenv("GOAL_AVG_DECAY_OFFSET", "4.0"))
+
+_GOAL_AVG_CACHE: dict = {}
+
+
+def _league_goal_averages(league_id, team_stats, fixtures, stats_types):
+    """(home_goal_avg, away_goal_avg) for a competition.
+
+    Both callers need both numbers, and the whole thing is a couple of pandas
+    passes over the full stat frame, so it is computed once and cached on the
+    identity+shape of the two frames. They are rebuilt per projection run and
+    held alive by the caller for its duration, so identity is stable within a
+    run and a new run misses the cache rather than reading a stale entry.
+    """
     import pandas as pd
-    fixtures = fixtures[fixtures['competition_id'] == league_id]
-    df = fixtures[['id', 'home_team_id', 'away_team_id', 'kickoff_datetime']].merge(
-        team_stats[['fixture_id', 'team_id', 'stats_type_id', 'value']], left_on='id', right_on='fixture_id',
-        how='inner')
-    df.drop_duplicates(subset=['id', 'home_team_id', 'away_team_id', 'team_id', 'stats_type_id'], inplace=True)
-    df['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(df['kickoff_datetime'])).dt.days // 7
-    df['Weeks Since Kickoff'] = df['Weeks Since Kickoff'].astype(int)
-    df['Weight'] = 0.9 ** (df['Weeks Since Kickoff'] - 5)  # UPDATED - changed to 0.9 and -5
-    df.loc[df['Weeks Since Kickoff'] < 6, 'Weight'] = 1  # NEW - set weight to 1 for games within last 6 weeks
-    df['Weighted Value'] = df['value'] * df['Weight']
-    goals = df[df['stats_type_id'] == get_stat_id('Goals', stats_types)]
-    home_goals = goals[goals['team_id'] == goals['home_team_id']]
-    home_goals_average = home_goals['Weighted Value'].sum() / home_goals['Weight'].sum()
-    xG = df[df['stats_type_id'] == get_stat_id('Expected Goals (xG)', stats_types)]
-    home_xG = xG[xG['team_id'] == xG['home_team_id']]
-    home_xG_average = home_xG['Weighted Value'].sum() / home_xG['Weight'].sum()
-    adjusted_home_goal_average = home_goals_average * 0.3 + home_xG_average * 0.7
-    return adjusted_home_goal_average
+
+    key = (int(league_id), id(fixtures), len(fixtures), id(team_stats), len(team_stats))
+    hit = _GOAL_AVG_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    fx = fixtures[fixtures['competition_id'] == league_id]
+    if 'state_id' in fx.columns:
+        fx = fx[fx['state_id'] == 5]
+    fx = fx[fx['home_team_goals'].notna() & fx['away_team_goals'].notna()]
+
+    if fx.empty:
+        _warn_stat_coverage_miss('Goals', "team")
+        return (float('nan'), float('nan'))
+
+    fx = fx[['id', 'home_team_id', 'away_team_id', 'kickoff_datetime',
+             'home_team_goals', 'away_team_goals']].drop_duplicates(subset=['id'])
+
+    # xG per side. A fixture needs both sides to qualify -- a one-sided row
+    # would bias the ratio, which is the one thing the ratio cannot absorb.
+    xg_id = get_stat_id('Expected Goals (xG)', stats_types)
+    xg = team_stats[team_stats['stats_type_id'] == xg_id][['fixture_id', 'team_id', 'value']]
+    xg = xg.drop_duplicates(subset=['fixture_id', 'team_id'])
+    df = fx.merge(xg.rename(columns={'team_id': 'h_tid', 'value': 'home_xg'}),
+                  left_on=['id', 'home_team_id'], right_on=['fixture_id', 'h_tid'], how='left')
+    df = df.merge(xg.rename(columns={'team_id': 'a_tid', 'value': 'away_xg'}),
+                  left_on=['id', 'away_team_id'], right_on=['fixture_id', 'a_tid'], how='left')
+
+    have_xg = df['home_xg'].notna() & df['away_xg'].notna()
+    xg_weight = XG_WEIGHT
+    if have_xg.any():
+        df = df[have_xg]
+    else:
+        # A league with no xG at all (lower divisions, some domestic cups).
+        # The old code produced NaN here and poisoned every projection
+        # downstream; fall back to goals only instead.
+        xg_weight = 0.0
+        df = df.assign(home_xg=0.0, away_xg=0.0)
+
+    age_weeks = ((pd.Timestamp.utcnow().tz_localize(None) - pd.to_datetime(df['kickoff_datetime']))
+                 .dt.total_seconds() / (7 * 86400.0)).clip(lower=0.0)
+
+    g_w = 1.0 - xg_weight
+    home_val = df['home_team_goals'].astype(float) * g_w + df['home_xg'].astype(float) * xg_weight
+    away_val = df['away_team_goals'].astype(float) * g_w + df['away_xg'].astype(float) * xg_weight
+
+    def _weighted(mask, k):
+        w = (age_weeks[mask] + DECAY_OFFSET) ** -k
+        tot = w.sum()
+        if tot <= 0:
+            return None
+        return ((home_val[mask] * w).sum() / tot, (away_val[mask] * w).sum() / tot)
+
+    in_window = age_weeks <= LEVEL_WINDOW_WEEKS
+    lvl = _weighted(in_window, LEVEL_K)
+    if lvl is None:                      # window emptied the pool
+        lvl = _weighted(age_weeks >= 0, LEVEL_K)
+    rat = _weighted(age_weeks >= 0, RATIO_K)
+
+    if lvl is None or rat is None or rat[1] <= 0:
+        return (float('nan'), float('nan'))
+
+    level = lvl[0] + lvl[1]
+    ratio = rat[0] / rat[1]
+    home = level * ratio / (1.0 + ratio)
+    away = level / (1.0 + ratio)
+
+    if len(_GOAL_AVG_CACHE) > 512:
+        _GOAL_AVG_CACHE.clear()
+    _GOAL_AVG_CACHE[key] = (home, away)
+    return (home, away)
+
+
+def get_home_goal_avg(league_id, team_stats, fixtures, stats_types):
+    return _league_goal_averages(league_id, team_stats, fixtures, stats_types)[0]
 
 
 def get_away_goal_avg(league_id, team_stats, fixtures, stats_types):
-    import pandas as pd
-    fixtures = fixtures[fixtures['competition_id'] == league_id]
-    df = fixtures[['id', 'home_team_id', 'away_team_id', 'kickoff_datetime']].merge(
-        team_stats[['fixture_id', 'team_id', 'stats_type_id', 'value']], left_on='id', right_on='fixture_id',
-        how='inner')
-    df.drop_duplicates(subset=['id', 'home_team_id', 'away_team_id', 'team_id', 'stats_type_id'], inplace=True)
-    df['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(df['kickoff_datetime'])).dt.days // 7
-    df['Weeks Since Kickoff'] = df['Weeks Since Kickoff'].astype(int)
-    df['Weight'] = 0.9 ** (df['Weeks Since Kickoff'] - 5)  # UPDATED - changed to 0.9 and -5
-    df.loc[df['Weeks Since Kickoff'] < 6, 'Weight'] = 1  # NEW - set weight to 1 for games within last 6 weeks
-    df['Weighted Value'] = df['value'] * df['Weight']
-    goals = df[df['stats_type_id'] == get_stat_id('Goals', stats_types)]
-    away_goals = goals[goals['team_id'] == goals['away_team_id']]
-    away_goals_average = away_goals['Weighted Value'].sum() / away_goals['Weight'].sum()
-    xG = df[df['stats_type_id'] == get_stat_id('Expected Goals (xG)', stats_types)]
-    away_xG = xG[xG['team_id'] == xG['away_team_id']]
-    away_xG_average = away_xG['Weighted Value'].sum() / away_xG['Weight'].sum()
-    adjusted_away_goal_average = away_goals_average * 0.3 + away_xG_average * 0.7
-    return adjusted_away_goal_average
+    return _league_goal_averages(league_id, team_stats, fixtures, stats_types)[1]
 
 
 def make_goal_prediction(attack_rating, defense_rating, average_goals):
