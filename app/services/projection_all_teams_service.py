@@ -741,6 +741,19 @@ class ProjectionAllTeams:
                         )
                     finally:
                         release_source_connection(_uni_conn)
+                    # Which teams carry the market in their rating. Blending
+                    # bookie probabilities again below would apply the same
+                    # view twice — the rating says a team is strong BECAUSE
+                    # the book does, then the fixture is dragged toward the
+                    # book on top. projection_service has gated this since
+                    # a5279d6; this service never did, so a Run All produced
+                    # different numbers from the nightly for the same league.
+                    try:
+                        _odds_teams_all = set(
+                            _uni_audit.loc[_uni_audit['odds'].notna(), 'Team'].astype(str)
+                        ) if _uni_audit is not None and not _uni_audit.empty else set()
+                    except Exception:
+                        _odds_teams_all = set()
                     logger.info(f"[{league}] Step: unified rating applied")
                 except Exception as _uni_err:
                     logger.warning(
@@ -862,11 +875,21 @@ class ProjectionAllTeams:
                         score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
                     home_goals = score_preds['Home Goals'][i]
                     away_goals = score_preds['Away Goals'][i]
-                    if pd.isna(score_preds['Home Odds %'][i]) == False:
+                    # Suppress only where BOTH teams already carry the market
+                    # in their rating, matching projection_service. A thin book
+                    # prices a minority of the field, and those fixtures must
+                    # keep the blend or they get no market input at all.
+                    _teams_with_odds = locals().get('_odds_teams_all') or set()
+                    _fx_beta = odds_beta
+                    if _teams_with_odds:
+                        _both = (str(next_fix['home_team'].iloc[i]) in _teams_with_odds
+                                 and str(next_fix['away_team'].iloc[i]) in _teams_with_odds)
+                        _fx_beta = 0.0 if _both else odds_beta
+                    if pd.isna(score_preds['Home Odds %'][i]) == False and _fx_beta:
                         home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                        adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                        adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                        adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
+                        adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * _fx_beta)
+                        adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * _fx_beta)
+                        adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * _fx_beta)
                         new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
                                                                                adjusted_draw_prob, adjusted_away_win_prob,
                                                                                boost)
