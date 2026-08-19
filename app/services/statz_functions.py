@@ -1062,8 +1062,15 @@ def find_inputs_for_probs(home_start, away_start, target_home, target_draw, targ
         draw_prob = np.sum(np.diag(Z)) * boost
         away_win_prob = np.sum(np.tril(Z, k=-1))
         remaining_prob = 1 - draw_prob
-        home_win_prob = (home_win_prob / (home_win_prob + away_win_prob)) * remaining_prob
-        away_win_prob = (away_win_prob / (home_win_prob + away_win_prob)) * remaining_prob
+        # Capture both BEFORE reassigning either. The previous form assigned
+        # home_win_prob first and then used that new value in the away
+        # denominator, so away was normalised against the wrong total — and
+        # this function stopped mirroring get_result_probs, which is the one
+        # thing its docstring says it must do.
+        original_home_probs = home_win_prob
+        original_away_probs = away_win_prob
+        home_win_prob = (original_home_probs / (original_home_probs + original_away_probs)) * remaining_prob
+        away_win_prob = (original_away_probs / (original_home_probs + original_away_probs)) * remaining_prob
         return (home_win_prob - target_home / 100) ** 2 + (draw_prob - target_draw / 100) ** 2 + (
                     away_win_prob - target_away / 100) ** 2
 
