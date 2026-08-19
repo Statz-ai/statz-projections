@@ -861,6 +861,20 @@ class ProjectionService:
                 except Exception:
                     _n_odds = 0
                 ProjectionService._strength_inputs['rating_used_odds'] = _n_odds > 0
+                # WHICH teams, not merely whether any. A thin book prices a
+                # minority of the field — Super Lig 5 of 18, Saudi 6 of 18,
+                # Austrian 6 of 12 on 2026-08-19 — and a league-wide flag
+                # suppressed the goals blend across every fixture in those
+                # leagues, including the majority whose ratings carry no market
+                # information at all. Those fixtures got no market input from
+                # anywhere, the opposite of the intent: a league without
+                # outright odds keeps the fixture blend.
+                try:
+                    ProjectionService._strength_inputs['odds_teams'] = set(
+                        _uni_audit.loc[_uni_audit['odds'].notna(), 'Team'].astype(str)
+                    ) if _uni_audit is not None and not _uni_audit.empty else set()
+                except Exception:
+                    ProjectionService._strength_inputs['odds_teams'] = set()
             finally:
                 release_source_connection(_uni_conn)
             logger.info(f"[{league}] Step: unified rating applied")
@@ -1097,9 +1111,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -1120,6 +1136,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -1130,12 +1147,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                        score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                    i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -1146,13 +1171,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3130,9 +3163,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3153,6 +3188,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -3163,12 +3199,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                    score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -3179,13 +3223,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3353,9 +3405,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3378,6 +3432,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -3388,12 +3443,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                    score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -3404,13 +3467,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -3762,9 +3833,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3785,6 +3858,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -3795,12 +3869,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                    score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -3811,13 +3893,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -4471,9 +4561,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -4494,6 +4586,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -4504,12 +4597,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                        score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                    i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -4520,13 +4621,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )
@@ -5400,9 +5509,11 @@ class ProjectionService:
         # Leagues whose rating got no odds component keep the fixture blend
         # exactly as before, so this is per-league and self-selecting.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
+        _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
         goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed — outright odds already in the rating")
+            logger.info(f"[{league}] goals blend suppressed per fixture — "
+                        f"{len(_odds_teams)} team(s) carry odds in their rating")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -5423,6 +5534,7 @@ class ProjectionService:
         from app.services.odds_blend import (
             load_goals_odds_for_fixtures,
             compute_final_goals_and_probs,
+            power_devig_1x2,
         )
         _odds_conn = await get_source_connection()
         try:
@@ -5433,12 +5545,20 @@ class ProjectionService:
             release_source_connection(_odds_conn)
 
         for i in range(len(score_preds)):
-            bookie_margin = 1 + (
-                    score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                i, 'Away Odds %'] - 100) / 100
-            score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-            score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+            # Power de-vig, replacing proportional (divide by the book
+            # percentage). Margin is loaded onto longshots rather than spread
+            # evenly, so proportional leaves outsiders over-priced and
+            # favourites under-priced. George's remove_bookie_margin, applied
+            # where he wrote it for.
+            _dv = power_devig_1x2(
+                next_fix['bet365_home_odds_decimal'].iloc[i],
+                next_fix['bet365_draw_odds_decimal'].iloc[i],
+                next_fix['bet365_away_odds_decimal'].iloc[i],
+            )
+            if _dv is not None:
+                score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
             bookie_1x2_pct = None
@@ -5449,13 +5569,21 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
+            # Suppress only where BOTH teams already carry the market in their
+            # rating. In a thin league most do not, and those fixtures keep the
+            # blend rather than losing the market entirely.
+            _fx_weight = goals_odds_weight
+            if _rating_used_odds and _odds_teams:
+                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
+                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
+                _fx_weight = 0.0 if _both else odds_beta
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    goals_odds_weight,
+                    _fx_weight,
                     boost,
                     dixon_coles_rho,
                 )

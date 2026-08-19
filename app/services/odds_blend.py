@@ -293,6 +293,45 @@ def _hda_from_lambdas(lh: float, la: float) -> Tuple[float, float, float]:
     return ph, pd_, pa
 
 
+def power_devig_1x2(home_odds, draw_odds, away_odds):
+    """Margin-stripped (p_home, p_draw, p_away) from decimal 1X2 odds.
+
+    Solve p_i = (1/o_i)^k for the k that makes the three sum to 1.
+
+    Proportional de-vig — dividing each implied probability by the book
+    percentage — assumes the bookmaker spreads margin evenly across the three
+    outcomes. It does not: margin is loaded onto longshots, so proportional
+    leaves outsiders systematically over-priced and favourites under-priced.
+    George's own version of this solved p**(1/k) with fsolve; same method,
+    same family, expressed here as p**k by bisection to match power_devig in
+    unified_ratings and to avoid a solver that can wander on degenerate input.
+
+    Returns None if any price is unusable.
+    """
+    try:
+        odds = [float(home_odds), float(draw_odds), float(away_odds)]
+    except (TypeError, ValueError):
+        return None
+    if any(o is None or o <= 1.0 for o in odds):
+        return None
+
+    lo, hi = 0.5, 5.0
+    for _ in range(60):
+        k = (lo + hi) / 2
+        if sum((1.0 / o) ** k for o in odds) > 1.0:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    p = [(1.0 / o) ** k for o in odds]
+    total = sum(p)
+    if total <= 0:
+        return None
+    # Bisection lands within ~1e-18 of 1.0; normalise so callers can rely on
+    # an exact sum rather than carrying the residual into a goal solve.
+    return tuple(x / total for x in p)
+
+
 def derive_bookie_lambdas(
     fixture_id: int,
     lambda_h_model: float,

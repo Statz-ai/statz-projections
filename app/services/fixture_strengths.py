@@ -63,34 +63,7 @@ MIN_FIXTURES_PER_TEAM = 4
 _FIT_ITERATIONS = 200
 
 
-def power_devig_1x2(home_odds, draw_odds, away_odds):
-    """Margin-stripped (p_h, p_d, p_a) by the power method.
-
-    p_i = (1/o_i)^k, k solved so they sum to 1.
-
-    Deliberately NOT the proportional divide-by-overround used elsewhere in
-    the pipeline. Bookmakers load more margin onto longshots, so removing it
-    uniformly leaves longshots overstated. Measured across 263 live bet365
-    prices, the power method moves +2.3pp onto favourites and -1.4pp off
-    longshots. New code, so it starts correct rather than inheriting the
-    older method.
-    """
-    if not (home_odds and draw_odds and away_odds):
-        return None
-    if min(home_odds, draw_odds, away_odds) <= 1.0:
-        return None
-    raw = [1.0 / home_odds, 1.0 / draw_odds, 1.0 / away_odds]
-    if sum(raw) <= 1.0:
-        return tuple(raw)                      # no margin to strip
-    lo, hi = 1.0, 6.0
-    for _ in range(80):
-        k = (lo + hi) / 2.0
-        if sum(r ** k for r in raw) > 1.0:
-            lo = k
-        else:
-            hi = k
-    k = (lo + hi) / 2.0
-    return tuple(r ** k for r in raw)
+from app.services.odds_blend import power_devig_1x2  # shared implementation
 
 
 def fit_strengths(observations, weights, n_teams, iterations=_FIT_ITERATIONS):

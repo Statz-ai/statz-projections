@@ -845,13 +845,21 @@ class ProjectionAllTeams:
                 over_1 = []
                 over_2 = []
                 btts = []
+                from app.services.odds_blend import power_devig_1x2
                 for i in range(len(score_preds)):
-                    bookie_margin = 1 + (
-                                score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
-                            i, 'Away Odds %'] - 100) / 100
-                    score_preds.loc[i, 'Home Odds %'] = (score_preds.loc[i, 'Home Odds %'] / bookie_margin).round(2)
-                    score_preds.loc[i, 'Draw Odds %'] = (score_preds.loc[i, 'Draw Odds %'] / bookie_margin).round(2)
-                    score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
+                    # Power de-vig, matching projection_service. Proportional
+                    # assumes margin is spread evenly across the three outcomes;
+                    # it is loaded onto longshots, so proportional leaves
+                    # outsiders over-priced.
+                    _dv = power_devig_1x2(
+                        next_fix['bet365_home_odds_decimal'].iloc[i],
+                        next_fix['bet365_draw_odds_decimal'].iloc[i],
+                        next_fix['bet365_away_odds_decimal'].iloc[i],
+                    )
+                    if _dv is not None:
+                        score_preds.loc[i, 'Home Odds %'] = round(_dv[0] * 100, 2)
+                        score_preds.loc[i, 'Draw Odds %'] = round(_dv[1] * 100, 2)
+                        score_preds.loc[i, 'Away Odds %'] = round(_dv[2] * 100, 2)
                     home_goals = score_preds['Home Goals'][i]
                     away_goals = score_preds['Away Goals'][i]
                     if pd.isna(score_preds['Home Odds %'][i]) == False:
