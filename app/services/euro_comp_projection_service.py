@@ -417,8 +417,8 @@ class EuroCompProjectionService:
         # NaN-filter keeps the math safe for between-season leagues whose
         # team_stats might return None.
         _goal_avg_pool = [lid for lid in EuroCompProjectionService.TOP_5_LEAGUE_IDS if lid in league_ids]
-        avg_home_goals_list = [get_home_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in _goal_avg_pool]
-        avg_away_goals_list = [get_away_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in _goal_avg_pool]
+        avg_home_goals_list = [get_home_goal_avg(lid, team_stats, fixtures_df, stats_types, standings, seasons) for lid in _goal_avg_pool]
+        avg_away_goals_list = [get_away_goal_avg(lid, team_stats, fixtures_df, stats_types, standings, seasons) for lid in _goal_avg_pool]
         avg_home_goals_list = [v for v in avg_home_goals_list if v is not None and not np.isnan(v)]
         avg_away_goals_list = [v for v in avg_away_goals_list if v is not None and not np.isnan(v)]
         avg_home_goals = np.mean(avg_home_goals_list) if avg_home_goals_list else 1.5

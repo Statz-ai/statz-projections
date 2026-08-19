@@ -785,13 +785,105 @@ def get_market_value(league_dashed, div, country_code):
 LEVEL_K = float(os.getenv("GOAL_AVG_LEVEL_K", "1.0"))
 LEVEL_WINDOW_WEEKS = float(os.getenv("GOAL_AVG_LEVEL_WINDOW_WEEKS", "104"))
 RATIO_K = float(os.getenv("GOAL_AVG_RATIO_K", "0.4"))
+# The ratio now comes from the standings venue splits by default. See
+# _standings_ratio for why. GOAL_AVG_RATIO_SOURCE=fixtures reverts.
+RATIO_SOURCE = os.getenv("GOAL_AVG_RATIO_SOURCE", "standings")
+RATIO_SEASONS = int(os.getenv("GOAL_AVG_RATIO_SEASONS", "4"))
+RATIO_MIN_MATCHES = int(os.getenv("GOAL_AVG_RATIO_MIN_MATCHES", "300"))
 XG_WEIGHT = float(os.getenv("GOAL_AVG_XG_WEIGHT", "0.5"))
 DECAY_OFFSET = float(os.getenv("GOAL_AVG_DECAY_OFFSET", "4.0"))
 
 _GOAL_AVG_CACHE: dict = {}
 
 
-def _league_goal_averages(league_id, team_stats, fixtures, stats_types):
+
+def _standings_ratio(league_id, standings, seasons):
+    """Home/away goal ratio from the standings venue splits, or None.
+
+    Why not from `fixtures`, which is where every other number here comes
+    from: a venue effect can only be measured match by match, and we hold
+    2-3 seasons of fixtures against 5-6 seasons of standings. Sportmonks has
+    always sent the home/away breakdown (detail types 135-146) on every
+    standings import; we simply never stored it until 2026-08-19. Verified
+    identical to the fixture-derived figure on the seasons where we have
+    both -- Premier League 23/24 1.2171, 24/25 1.0648, 25/26 1.2473.
+
+    Note this cannot be done from the columns we had before. Summing
+    `goals_for` across a league always equals summing `goals_against`, so no
+    aggregation of the old standings could express a venue effect at all.
+
+    **How it behaves in season.** The pool is RATIO_SEASONS + 1 seasons: the
+    in-progress one plus RATIO_SEASONS of completed history. The current
+    season is ADDITIVE, not displacing, and that is deliberate -- taking
+    simply "the 4 most recent seasons" meant the oldest fell out the instant
+    a new season kicked off, so the Championship went from 2,208 matches to
+    1,668 on the strength of 12 new ones. A 24% sample cut at the exact
+    moment we know least, and it moved that league's ratio by 0.025 on its
+    own. Now the sample only ever grows during a season.
+
+    Within the window it needs no decay constant, because we sum goals rather
+    than averaging season figures: match count IS the weight. A league five
+    matches in contributes 5 against ~2200, so ~0.2%; by May it is a fifth of
+    the pool. The number therefore moves on every standings import, but only
+    by as much as the new matches deserve.
+
+    Once a season completes and before the next starts, the window briefly
+    holds RATIO_SEASONS + 1 completed seasons rather than RATIO_SEASONS. That
+    is harmless -- more history, in the off-season, when nothing is being
+    projected against it -- and it avoids depending on `is_current`, which
+    Sportmonks flips weeks early (see memory/fpl_summer_rollover_pollution).
+
+    The oldest season dropping out is a step change, but measured at 4 vs 5
+    seasons it is 0.014 on average and 0.033 at worst, and it lands between
+    seasons.
+    """
+    import pandas as pd
+
+    if standings is None or seasons is None:
+        return None
+    if getattr(standings, "empty", True) or getattr(seasons, "empty", True):
+        return None
+    # Databases that have not run the 2026_08_19 migration yet.
+    if "home_goals_for" not in standings.columns:
+        return None
+
+    s = standings[standings["competition_id"] == league_id]
+    s = s[s["home_goals_for"].notna() & s["away_goals_for"].notna()]
+    if s.empty:
+        return None
+
+    played = pd.to_numeric(s["home_played"], errors="coerce").fillna(0)
+    s = s[played > 0]
+    if s.empty:
+        return None
+
+    se = seasons[seasons["competition_id"] == league_id][["id", "start_date"]]
+    if se.empty:
+        return None
+    # Rank only seasons that actually have played standings, so a
+    # pre-created future season cannot push a real one out of the window.
+    se = se[se["id"].isin(s["season_id"].unique())]
+    keep = set(
+        se.sort_values("start_date", ascending=False)
+          .head(RATIO_SEASONS + 1)["id"]
+          .tolist()
+    )
+    s = s[s["season_id"].isin(keep)]
+    if s.empty:
+        return None
+
+    hg = pd.to_numeric(s["home_goals_for"], errors="coerce").fillna(0).sum()
+    ag = pd.to_numeric(s["away_goals_for"], errors="coerce").fillna(0).sum()
+    hp = pd.to_numeric(s["home_played"], errors="coerce").fillna(0).sum()
+
+    if hp < RATIO_MIN_MATCHES or hg <= 0 or ag <= 0:
+        return None
+
+    return float(hg) / float(ag)
+
+
+def _league_goal_averages(league_id, team_stats, fixtures, stats_types,
+                          standings=None, seasons=None):
     """(home_goal_avg, away_goal_avg) for a competition.
 
     Both callers need both numbers, and the whole thing is a couple of pandas
@@ -802,7 +894,8 @@ def _league_goal_averages(league_id, team_stats, fixtures, stats_types):
     """
     import pandas as pd
 
-    key = (int(league_id), id(fixtures), len(fixtures), id(team_stats), len(team_stats))
+    key = (int(league_id), id(fixtures), len(fixtures), id(team_stats), len(team_stats),
+           id(standings), id(seasons))
     hit = _GOAL_AVG_CACHE.get(key)
     if hit is not None:
         return hit
@@ -858,13 +951,28 @@ def _league_goal_averages(league_id, team_stats, fixtures, stats_types):
     lvl = _weighted(in_window, LEVEL_K)
     if lvl is None:                      # window emptied the pool
         lvl = _weighted(age_weeks >= 0, LEVEL_K)
-    rat = _weighted(age_weeks >= 0, RATIO_K)
 
-    if lvl is None or rat is None or rat[1] <= 0:
+    if lvl is None:
         return (float('nan'), float('nan'))
 
     level = lvl[0] + lvl[1]
-    ratio = rat[0] / rat[1]
+
+    # The ratio prefers the standings, which reach back further than
+    # `fixtures` does. Falls through to the fixture estimate for any league
+    # the standings cannot answer for -- thin history, a competition with no
+    # venue splits in its feed, or a database without the migration.
+    ratio = None
+    if RATIO_SOURCE == "standings":
+        ratio = _standings_ratio(league_id, standings, seasons)
+
+    if ratio is None:
+        rat = _weighted(age_weeks >= 0, RATIO_K)
+        if rat is None or rat[1] <= 0:
+            return (float('nan'), float('nan'))
+        ratio = rat[0] / rat[1]
+
+    if not (ratio > 0):
+        return (float('nan'), float('nan'))
     home = level * ratio / (1.0 + ratio)
     away = level / (1.0 + ratio)
 
@@ -874,12 +982,16 @@ def _league_goal_averages(league_id, team_stats, fixtures, stats_types):
     return (home, away)
 
 
-def get_home_goal_avg(league_id, team_stats, fixtures, stats_types):
-    return _league_goal_averages(league_id, team_stats, fixtures, stats_types)[0]
+def get_home_goal_avg(league_id, team_stats, fixtures, stats_types,
+                      standings=None, seasons=None):
+    return _league_goal_averages(
+        league_id, team_stats, fixtures, stats_types, standings, seasons)[0]
 
 
-def get_away_goal_avg(league_id, team_stats, fixtures, stats_types):
-    return _league_goal_averages(league_id, team_stats, fixtures, stats_types)[1]
+def get_away_goal_avg(league_id, team_stats, fixtures, stats_types,
+                      standings=None, seasons=None):
+    return _league_goal_averages(
+        league_id, team_stats, fixtures, stats_types, standings, seasons)[1]
 
 
 def make_goal_prediction(attack_rating, defense_rating, average_goals):

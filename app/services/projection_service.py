@@ -831,8 +831,8 @@ class ProjectionService:
                     _uni_ids[_name] = int(get_team_id(_name, teams, league_id, comp_teams))
                 except Exception:
                     continue
-            _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-                        + get_away_goal_avg(league_id, team_stats, fixtures, stats_types)) / 2
+            _uni_gpg = (get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+                        + get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)) / 2
             _uni_conn = await get_source_connection()
             try:
                 ratings, _uni_audit = await unified_ratings.apply_unified_ratings(
@@ -1081,8 +1081,8 @@ class ProjectionService:
 
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
 
         logger.info(f"[{league}] avg_home_goals={avg_home_goals:.3f}, avg_away_goals={avg_away_goals:.3f}")
         
@@ -3134,8 +3134,8 @@ class ProjectionService:
 
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
 
         logger.info(f"[{league}] avg_home_goals={avg_home_goals:.3f}, avg_away_goals={avg_away_goals:.3f}")
         
@@ -3382,8 +3382,8 @@ class ProjectionService:
         next_fix.reset_index(drop=True, inplace=True)
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         # Dixon-Coles replaces the flat draw boost where a league has rho
@@ -3810,8 +3810,8 @@ class ProjectionService:
 
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         # Dixon-Coles replaces the flat draw boost where a league has rho
@@ -4538,8 +4538,8 @@ class ProjectionService:
 
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         # Dixon-Coles replaces the flat draw boost where a league has rho
@@ -5486,8 +5486,8 @@ class ProjectionService:
 
         # In[ ]:
 
-        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types)
-        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
+        avg_home_goals = get_home_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
+        avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types, league_standings, seasons)
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         # Dixon-Coles replaces the flat draw boost where a league has rho
