@@ -238,31 +238,6 @@ async def project_fixture(request: FixtureProjectionRequest, background_tasks: B
     return {"status": "started", "fixture_id": fid, "competition": comp_name}
 
 
-@router.post("/fixtures")
-async def fixtures(request: LeagueRequest):
-    return await projection_service.fixtures(request)
-
-
-@router.post("/predicted-tables")
-async def predicted_tables(request: LeagueRequest):
-    return await projection_service.predicted_table(request)
-
-
-@router.post("/teams")
-async def teams(request: LeagueRequest):
-    return await projection_service.teams(request)
-
-
-@router.post("/players")
-async def players(request: LeagueRequest):
-    return await projection_service.players(request)
-
-
-@router.post("/player-props")
-async def player_props(request: LeagueRequest):
-    return await projection_service.player_props(request.league)
-
-
 @router.post("/all-leagues")
 async def all_leagues(background_tasks: BackgroundTasks, request: AllLeaguesRequest = None):
     """Start all-leagues projection in background. Optionally pass 'leagues' list to run only specific leagues."""
