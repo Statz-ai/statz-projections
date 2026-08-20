@@ -59,11 +59,33 @@ with ~7 GB available.
 
 So the reason for a single worker may simply be out of date.
 
-**The question to answer: what is peak RSS during a real run under the current
-loader?** If it is comfortably under half of available memory, a second worker
-becomes viable, and the cross-worker safety already exists — the flock in
-`routes.py` is held by the kernel per file descriptor, so it is genuinely
-cross-process.
+### ✅ MEASURED 2026-08-20, during the 13:35 refresh
+
+150 samples at 12-second intervals, each recording gunicorn RSS alongside an
+`/openapi.json` probe on a 4-second timeout.
+
+| | |
+|---|---|
+| Idle RSS | **0.62 GB** |
+| Peak RSS during the run | **0.78 GB** |
+| Box total / available | 15 GB / ~7 GB |
+| Blocked probes inside the run window (13:37–13:52) | **41 of 57 — 71%** |
+| Blocked probes outside it | **0 of 93** |
+
+**Memory is not the constraint, and is not close to being one.** A run costs
+about 150 MB above idle. The Dockerfile's fear of 4 GB per worker belongs to
+the CSV architecture that no longer exists; a second worker costs well under a
+gigabyte against seven available.
+
+**And the blocking is real but not total.** 71% of probes failed during the
+run, 0% outside it — so the loop does surface between synchronous stretches,
+just not often enough or long enough for a caller to rely on. That is the
+shape you would expect from long numpy sections between genuine awaits, and it
+is why a second worker helps: the free worker answers while the busy one is in
+a stretch.
+
+The cross-worker safety already exists — the flock in `routes.py` is held by
+the kernel per file descriptor, so it is genuinely cross-process.
 
 **Honest caveat, so this is not oversold:** a second worker is a large
 improvement, not a guarantee. Workers share a listening socket, so a connection
@@ -111,16 +133,27 @@ nothing more, so a subprocess model fits the existing shape.
 
 ## Recommendation
 
-1. **Measure peak RSS during a run.** One command while a projection is going.
-   It decides whether A is available, and A is an order of magnitude cheaper
-   than the alternatives.
-2. **If memory allows, do A** and confirm with the same `/openapi.json` probe
-   that produced the evidence above. If the server answers during a run, stop —
-   the problem is solved to the standard that matters.
-3. **If memory does not allow, do D.** It fixes the cause rather than improving
-   the odds, and it fits how the server is already used.
-4. **Do not do B.** It is the middle option that carries the most risk for the
-   least structural gain.
+**Do A.** The measurement removed the only reason not to: memory was the
+objection, and a run peaks at 0.78 GB against ~7 GB available. It is one number
+in the Dockerfile plus a rebuild, and the flock already makes it safe across
+processes.
+
+Then re-run the probe during the next run. If blocked probes fall from 71% to
+near zero, stop — the problem is solved to the standard that matters.
+
+**Remaining honesty about A:** workers share a listening socket, so a request
+accepted by the busy worker still waits. Expect a large improvement, not a
+guarantee. If the probe shows it is not enough, **do D** — it fixes the cause
+rather than improving the odds, and fits how the server is already used.
+
+**Do not do B.** It is the middle option that carries the most risk for the
+least structural gain.
+
+**One caveat on the measurement:** this was the 13:35 *refresh*, which skips the
+accuracy-dataset gap-fill and metrics that 02:00 does. The full run will use
+more. But the gap between 0.78 GB and a problem is roughly ninefold, so it
+would take a very large surprise to change the conclusion — worth a confirming
+sample at 02:00 rather than a reason to wait.
 
 ## How to know it worked
 
