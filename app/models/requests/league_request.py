@@ -29,19 +29,30 @@ class LeagueRequest(BaseModel):
     # Stop the DOMESTIC pipeline after a named stage instead of running it to
     # the end. Testing tool: the fixture stage — where the odds blend, the
     # guardrail and Dixon-Coles all live — takes about a second, but a full
-    # Premier League run costs ~13.7 minutes, nearly all of it in the season
-    # simulation, the model dataset and the player/fantasy stages downstream
-    # of it. `stop_after="fixtures"` gets that loop down to ~2 minutes, which
-    # is data load plus ratings and almost nothing else.
+    # Premier League run costs ~34 minutes, nearly all of it in the team-stat,
+    # player and fantasy stages downstream of it. `stop_after="fixtures"` gets
+    # that loop down to under 3 minutes, which is data load plus ratings and
+    # almost nothing else.
     #
     # Stages are a strict prefix chain, so this is "stop here", not "pick
     # some": each stage consumes the one before it.
     #
-    #   fixtures  -> fixture_projections                       (~2m10s on PL)
-    #   table     -> + predicted_table, league_position_probabilities (~3m45s)
-    #   teams     -> + team_projections                              (~6m30s)
-    #   players   -> + player_projections, player stat probs         (~11m)
-    #   None      -> everything, including props and the 5 fantasy tables
+    # Cumulative times below are from a FULL-SCOPE Premier League run (no
+    # fixture_ids, ~34.5 min end to end — the normal shape). A run scoped to an
+    # explicit fixture list is much shorter: 30 fixtures ran 13.7 min total.
+    # Only the fixture stage is roughly constant, because it is dominated by
+    # the ~2-3 min data load in _setup_league; everything after it scales with
+    # fixture count.
+    #
+    #   fixtures  -> fixture_projections                              2m49s
+    #   table     -> + predicted_table, league_position_probabilities 4m22s
+    #   teams     -> + team_projections                              21m27s
+    #   players   -> + player_projections, player stat probs         26m30s
+    #   None      -> + props and the 5 fantasy tables                34m30s
+    #
+    # The team-stat stage is the expensive one — ~17 min of that gap is
+    # get_team_round_predictions running the per-stat models over every
+    # fixture. The fantasy tail is ~8 min, half of it the bonus simulator.
     #
     # A partial run leaves every downstream table holding the PREVIOUS run's
     # numbers — that is the point, but it means a partial must never be

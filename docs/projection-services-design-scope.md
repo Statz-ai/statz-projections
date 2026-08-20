@@ -278,10 +278,17 @@ The *capability* Phase 2 was wanted for, delivered without the refactor:
 guards, so `git diff -w` on the service is additions only — the default path
 could not change.
 
-Measured on prod: fixtures-only Premier League **1.4 min against 13.7** for a
-full run. Cumulative stop points: fixtures 2m08s, table 3m43s, teams 6m31s,
-players 11m02s, full 13m41s. Almost all of the fixtures-only cost is the
-~2-minute data load in `_setup_league`; the blend stage itself is ~1s.
+Measured on prod against a **full-scope** PL run (no fixture list — the normal
+shape, ~34.5 min end to end): fixtures 2m49s, table 4m22s, teams 21m27s,
+players 26m30s, full 34m30s. So a fixtures-only re-run is **under 3 minutes
+against ~34**.
+
+A first pass at this quoted 13.7 min as the full-run baseline. That run was
+scoped to an explicit list of 30 fixtures; PL runs across the 14-day log are
+29–35 min. Only the fixture stage is roughly constant, being dominated by the
+~2–3 min data load in `_setup_league` — the blend itself is ~1s. Everything
+downstream scales with fixture count, and the team-stat stage
+(`get_team_round_predictions`, ~17 min) dominates the total.
 
 A partial writes **no `projections_runs` row** — a success would clear a
 failed-comp alert and feed the pipeline-dead canary while downstream tables
