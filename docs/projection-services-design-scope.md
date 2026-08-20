@@ -270,6 +270,29 @@ Pure refactor of `projections()` into the Layer 2 functions. No logic change.
   which is what makes cheap partial re-runs possible.
 - Effort: ~2 days, best done one stage per commit.
 
+### Phase 2a — partial re-runs — ✅ SHIPPED 2026-08-20
+
+The *capability* Phase 2 was wanted for, delivered without the refactor:
+`stop_after={fixtures,table,teams,players}` and `skip_datasets` on
+`LeagueRequest`. Implemented as stop points inside `projections()` plus two
+guards, so `git diff -w` on the service is additions only — the default path
+could not change.
+
+Measured on prod: fixtures-only Premier League **1.4 min against 13.7** for a
+full run. Cumulative stop points: fixtures 2m08s, table 3m43s, teams 6m31s,
+players 11m02s, full 13m41s. Almost all of the fixtures-only cost is the
+~2-minute data load in `_setup_league`; the blend stage itself is ~1s.
+
+A partial writes **no `projections_runs` row** — a success would clear a
+failed-comp alert and feed the pipeline-dead canary while downstream tables
+still held the previous run's numbers.
+
+**What this does NOT do:** extract the stages into functions. `projections()`
+is still one ~2,100-line method. The remaining value of Phase 2 is therefore
+structural only — testability, and being able to compose stages the way the
+international pipeline does. Decide whether that's worth it on its own merits
+now the capability is in.
+
 ### Phase 3 — converge euro on the shared stages (optional)
 Once stages exist, `euro_comp_projection_service` keeps its own ratings
 builder and scoping but composes the shared stages for fixtures/teams/
@@ -311,7 +334,10 @@ also the only other caller of `/all-leagues` besides the admin button.
    Run All Leagues now matches the nightly.
 2. ~~**Phase 0 deletion.**~~ Deleted outright, after the 743/743 measurement
    above.
-3. **Open: appetite for Phase 2.** The ~2-day tidy that extracts named stages
-   from the 2,070-line `projections()` and gives domestic comps the
-   `lean` / `ratings_only` partial re-runs internationals already have.
-   Nothing depends on it — Phases 0+1 already killed the drift.
+3. ~~**Appetite for Phase 2.**~~ George 2026-08-20: *"I'd like to be able to
+   re-run leagues without having to do the full run, good for testing"* —
+   that capability shipped as Phase 2a above, in about an hour rather than
+   two days, because it needed stop points rather than a refactor.
+4. **Open: is the structural half of Phase 2 still wanted?** Extracting named
+   stage functions out of `projections()` buys testability and composability,
+   but no new capability now that 2a is in.
