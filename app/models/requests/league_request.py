@@ -26,3 +26,33 @@ class LeagueRequest(BaseModel):
     # this re-runs JUST the ratings once the xG lands. Forces an empty fixture
     # list (ratings are bracket-wide).
     ratings_only: Optional[bool] = False
+    # Stop the DOMESTIC pipeline after a named stage instead of running it to
+    # the end. Testing tool: the fixture stage — where the odds blend, the
+    # guardrail and Dixon-Coles all live — takes about a second, but a full
+    # Premier League run costs ~13.7 minutes, nearly all of it in the season
+    # simulation, the model dataset and the player/fantasy stages downstream
+    # of it. `stop_after="fixtures"` gets that loop down to ~2 minutes, which
+    # is data load plus ratings and almost nothing else.
+    #
+    # Stages are a strict prefix chain, so this is "stop here", not "pick
+    # some": each stage consumes the one before it.
+    #
+    #   fixtures  -> fixture_projections                       (~2m10s on PL)
+    #   table     -> + predicted_table, league_position_probabilities (~3m45s)
+    #   teams     -> + team_projections                              (~6m30s)
+    #   players   -> + player_projections, player stat probs         (~11m)
+    #   None      -> everything, including props and the 5 fantasy tables
+    #
+    # A partial run leaves every downstream table holding the PREVIOUS run's
+    # numbers — that is the point, but it means a partial must never be
+    # mistaken for a healthy full run. `_run_single_league` therefore writes
+    # NO projections_runs row when this is set, so a partial can't clear a
+    # failed-comp alert or feed the pipeline-dead canary in
+    # ProjectionsFreshnessCheck. Nothing scheduled sets it.
+    stop_after: Optional[str] = None
+    # Skip the two analytics dataset writes (model dataset ~2m02s, accuracy
+    # dataset ~47s on PL). They feed retraining and accuracy tracking; nothing
+    # downstream in the same run reads them, so dropping them is safe for a
+    # test run and saves ~2m49s. Leave False for anything whose numbers you
+    # intend to keep.
+    skip_datasets: Optional[bool] = False

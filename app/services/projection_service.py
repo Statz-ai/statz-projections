@@ -988,10 +988,32 @@ class ProjectionService:
 
         return ratings
 
+    # Stage names for `stop_after`, in pipeline order. A strict prefix chain:
+    # each consumes the one before it, so the flag means "stop here", never
+    # "run only this". See LeagueRequest.stop_after.
+    STAGES = ('fixtures', 'table', 'teams', 'players')
+
     async def projections(self, league_request):
         league = league_request.league or 'Championship'
         _start_time = time.time()
+
+        _stop_after = getattr(league_request, 'stop_after', None) or None
+        _skip_datasets = bool(getattr(league_request, 'skip_datasets', False))
+        if _stop_after and _stop_after not in ProjectionService.STAGES:
+            # Loud, not silent: a typo'd stage that quietly ran the full
+            # pipeline would look like the partial run had simply been slow.
+            raise ValueError(
+                f"stop_after={_stop_after!r} is not a stage — "
+                f"expected one of {', '.join(ProjectionService.STAGES)}"
+            )
+
         logger.info(f'[{league}] START projections')
+        if _stop_after or _skip_datasets:
+            logger.warning(
+                f"[{league}] PARTIAL RUN — stop_after={_stop_after or 'none'} "
+                f"skip_datasets={_skip_datasets}. Tables after the stop point keep "
+                f"the PREVIOUS run's numbers, and no projections_runs row is written."
+            )
         # Run start on the SOURCE DB's clock, for the post-run dial true-up
         # skip. Must not use the container clock: the two differ by an hour, so
         # comparing a local timestamp against fpl_player_dials.updated_at would
@@ -1257,6 +1279,10 @@ class ProjectionService:
         await insert_fixtures_async(score_preds, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Fixtures inserted ({time.time()-_t:.1f}s)")
 
+        if _stop_after == 'fixtures':
+            logger.info(f"[{league}] STOPPED after 'fixtures' — {(time.time()-_start_time)/60:.1f} min")
+            return Response(status_code=204)
+
         # In[ ]:
 
         ## NEW - Update accuracy dataset with new predictions
@@ -1443,6 +1469,10 @@ class ProjectionService:
             except Exception as e:
                 logger.error(f"[{league}] league position probabilities write failed (non-fatal): {e}", exc_info=True)
 
+        if _stop_after == 'table':
+            logger.info(f"[{league}] STOPPED after 'table' — {(time.time()-_start_time)/60:.1f} min")
+            return Response(status_code=204)
+
         # # **Team Projections**
         #
         # Getting each Teams stat projections using the models
@@ -1478,44 +1508,48 @@ class ProjectionService:
 
         ## NEW - Add historical stats to the model dataset and drop them from team projections afterwards
 
-        new_rows = []
+        # Analytics only — feeds retraining, and nothing downstream in this
+        # run reads it. ~2m02s on a PL run. The History columns it harvests
+        # are dropped from team_projections just below either way.
+        if not _skip_datasets:
+            new_rows = []
 
-        for i in range(len(team_projections)):
-            team_df = team_projections.iloc[[i]]
-            new_row = {}
-            new_row['id'] = team_df['fixture_id'].values[0]
-            new_row['kickoff_datetime'] = team_df['kickoff_datetime'].values[0]
-            new_row['comp_id'] = league_id
-            new_row['Team'] = team_df['Team'].values[0]
-            new_row['Opponent'] = team_df['Opponent'].values[0]
-            new_row['Venue'] = team_df['Venue'].values[0]
-            for stat in stat_list:
-                new_row['Team ' + stat + ' History'] = team_df['Team ' + stat + ' History'].values[0]
-                new_row['Opponent ' + stat + ' History Against'] = \
-                team_df['Opponent ' + stat + ' History Against'].values[0]
-            new_rows.append(new_row)
+            for i in range(len(team_projections)):
+                team_df = team_projections.iloc[[i]]
+                new_row = {}
+                new_row['id'] = team_df['fixture_id'].values[0]
+                new_row['kickoff_datetime'] = team_df['kickoff_datetime'].values[0]
+                new_row['comp_id'] = league_id
+                new_row['Team'] = team_df['Team'].values[0]
+                new_row['Opponent'] = team_df['Opponent'].values[0]
+                new_row['Venue'] = team_df['Venue'].values[0]
+                for stat in stat_list:
+                    new_row['Team ' + stat + ' History'] = team_df['Team ' + stat + ' History'].values[0]
+                    new_row['Opponent ' + stat + ' History Against'] = \
+                    team_df['Opponent ' + stat + ' History Against'].values[0]
+                new_rows.append(new_row)
 
-        model_dataset_league = pd.concat([model_dataset_league, pd.DataFrame(new_rows)], ignore_index=True)
-        model_dataset_all = pd.concat([model_dataset_all, pd.DataFrame(new_rows)], ignore_index=True)
-        model_dataset_league.drop_duplicates(subset=['id', 'Team', 'Opponent', 'Venue'], keep='last', inplace=True)
-        model_dataset_all.drop_duplicates(subset=['id', 'Team', 'Opponent', 'Venue'], keep='last', inplace=True)
+            model_dataset_league = pd.concat([model_dataset_league, pd.DataFrame(new_rows)], ignore_index=True)
+            model_dataset_all = pd.concat([model_dataset_all, pd.DataFrame(new_rows)], ignore_index=True)
+            model_dataset_league.drop_duplicates(subset=['id', 'Team', 'Opponent', 'Venue'], keep='last', inplace=True)
+            model_dataset_all.drop_duplicates(subset=['id', 'Team', 'Opponent', 'Venue'], keep='last', inplace=True)
 
-        ProjectionService._write_df(model_dataset_league, f"{data_folder_path}/{league}_model_dataset_with_history")
-        ProjectionService._write_df(model_dataset_all, f"{data_folder_path}/all_leagues_model_dataset_with_history")
+            ProjectionService._write_df(model_dataset_league, f"{data_folder_path}/{league}_model_dataset_with_history")
+            ProjectionService._write_df(model_dataset_all, f"{data_folder_path}/all_leagues_model_dataset_with_history")
 
-        # Dual-write to DB (Phase 2 of the data-files-to-DB migration). Only
-        # the per-league df — the all_leagues table is implicit in the DB
-        # ("SELECT WHERE competition_id = X" or no filter = all pool). Wrapped
-        # in try/except so a DB failure doesn't break the parquet-based flow
-        # during the dual-write validation window.
-        try:
-            from app.repository.projection_dataset_repo import insert_model_dataset_async
-            await insert_model_dataset_async(
-                model_dataset_league, league_id, league,
-                teams, fixtures_df, comp_teams,
-            )
-        except Exception as _db_err:
-            logger.warning(f"[{league}] model_dataset DB dual-write failed: {_db_err}")
+            # Dual-write to DB (Phase 2 of the data-files-to-DB migration). Only
+            # the per-league df — the all_leagues table is implicit in the DB
+            # ("SELECT WHERE competition_id = X" or no filter = all pool). Wrapped
+            # in try/except so a DB failure doesn't break the parquet-based flow
+            # during the dual-write validation window.
+            try:
+                from app.repository.projection_dataset_repo import insert_model_dataset_async
+                await insert_model_dataset_async(
+                    model_dataset_league, league_id, league,
+                    teams, fixtures_df, comp_teams,
+                )
+            except Exception as _db_err:
+                logger.warning(f"[{league}] model_dataset DB dual-write failed: {_db_err}")
 
         # model_dataset_league.to_excel(rf"{data_folder_path}\{league}_model_dataset_with_history.xlsx", index=False)
         # model_dataset_all.to_excel(rf"{data_folder_path}\all_leagues_model_dataset_with_history.xlsx", index=False)
@@ -1841,48 +1875,55 @@ class ProjectionService:
         # team_projections_save.to_csv(rf"{save_file_path}\{league} Team.csv", index=False)
         await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
+        if _stop_after == 'teams':
+            logger.info(f"[{league}] STOPPED after 'teams' — {(time.time()-_start_time)/60:.1f} min")
+            return Response(status_code=204)
+
         team_projections_save.rename(columns={'Accurate Passes': 'Successful Passes'},
                                      inplace=True)  # NEW - Rename back for consistency with other datasets
 
         # In[ ]:
 
-        ## NEW - Update projection accuracy dataset
+        # Analytics only — feeds accuracy tracking, and nothing downstream
+        # in this run reads it. ~47s on a PL run.
+        if not _skip_datasets:
+            ## NEW - Update projection accuracy dataset
 
-        for fixture_id in team_projections_save['fixture_id'].unique():
-            fixture_projections = team_projections_save[team_projections_save['fixture_id'] == fixture_id]
-            # accuracy dataset has no columns for the PL-only stats
-            for stat in accuracy_stat_list(stat_list):
-                projection_accuracy_dataset_league.loc[
-                    projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Home Projected ' + stat] = \
-                fixture_projections.loc[fixture_projections['Venue'] == 'H', stat].values[0]
-                projection_accuracy_dataset_league.loc[
-                    projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Away Projected ' + stat] = \
-                fixture_projections.loc[fixture_projections['Venue'] == 'A', stat].values[0]
-                projection_accuracy_dataset_league.loc[
-                    projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Total Projected ' + stat] = \
-                fixture_projections[stat].sum()
+            for fixture_id in team_projections_save['fixture_id'].unique():
+                fixture_projections = team_projections_save[team_projections_save['fixture_id'] == fixture_id]
+                # accuracy dataset has no columns for the PL-only stats
+                for stat in accuracy_stat_list(stat_list):
+                    projection_accuracy_dataset_league.loc[
+                        projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Home Projected ' + stat] = \
+                    fixture_projections.loc[fixture_projections['Venue'] == 'H', stat].values[0]
+                    projection_accuracy_dataset_league.loc[
+                        projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Away Projected ' + stat] = \
+                    fixture_projections.loc[fixture_projections['Venue'] == 'A', stat].values[0]
+                    projection_accuracy_dataset_league.loc[
+                        projection_accuracy_dataset_league['fixture_id'] == fixture_id, 'Total Projected ' + stat] = \
+                    fixture_projections[stat].sum()
 
-        projection_accuracy_dataset_league.drop_duplicates(subset=['fixture_id'], keep='last', inplace=True)
-        projection_accuracy_dataset_league.reset_index(drop=True, inplace=True)
-        # projection_accuracy_dataset_league.to_excel(rf"{data_folder_path}\{league}_accuracy_dataset.xlsx", index=False)
-        ProjectionService._write_df(projection_accuracy_dataset_league, f"{data_folder_path}/{league}_accuracy_dataset")
+            projection_accuracy_dataset_league.drop_duplicates(subset=['fixture_id'], keep='last', inplace=True)
+            projection_accuracy_dataset_league.reset_index(drop=True, inplace=True)
+            # projection_accuracy_dataset_league.to_excel(rf"{data_folder_path}\{league}_accuracy_dataset.xlsx", index=False)
+            ProjectionService._write_df(projection_accuracy_dataset_league, f"{data_folder_path}/{league}_accuracy_dataset")
 
-        # Dual-write to DB (Phase 2 of data-files-to-DB migration).
-        try:
-            from app.repository.projection_dataset_repo import insert_accuracy_dataset_async
-            await insert_accuracy_dataset_async(
-                projection_accuracy_dataset_league, league_id, league,
-                teams, fixtures_df, comp_teams,
-            )
-        except Exception as _db_err:
-            logger.warning(f"[{league}] accuracy_dataset DB dual-write failed: {_db_err}")
+            # Dual-write to DB (Phase 2 of data-files-to-DB migration).
+            try:
+                from app.repository.projection_dataset_repo import insert_accuracy_dataset_async
+                await insert_accuracy_dataset_async(
+                    projection_accuracy_dataset_league, league_id, league,
+                    teams, fixtures_df, comp_teams,
+                )
+            except Exception as _db_err:
+                logger.warning(f"[{league}] accuracy_dataset DB dual-write failed: {_db_err}")
 
-        projection_accuracy_dataset_all = pd.concat(
-            [projection_accuracy_dataset_all, projection_accuracy_dataset_league], ignore_index=True)
-        projection_accuracy_dataset_all.drop_duplicates(subset=['fixture_id'], keep='last', inplace=True)
-        projection_accuracy_dataset_all.reset_index(drop=True, inplace=True)
-        # projection_accuracy_dataset_all.to_excel(rf"{data_folder_path}\all_leagues_accuracy_dataset.xlsx", index=False)
-        ProjectionService._write_df(projection_accuracy_dataset_all, f"{data_folder_path}/all_leagues_accuracy_dataset")
+            projection_accuracy_dataset_all = pd.concat(
+                [projection_accuracy_dataset_all, projection_accuracy_dataset_league], ignore_index=True)
+            projection_accuracy_dataset_all.drop_duplicates(subset=['fixture_id'], keep='last', inplace=True)
+            projection_accuracy_dataset_all.reset_index(drop=True, inplace=True)
+            # projection_accuracy_dataset_all.to_excel(rf"{data_folder_path}\all_leagues_accuracy_dataset.xlsx", index=False)
+            ProjectionService._write_df(projection_accuracy_dataset_all, f"{data_folder_path}/all_leagues_accuracy_dataset")
 
         #
         # # **Player Projections**
@@ -2032,6 +2073,11 @@ class ProjectionService:
         _t = time.time()
         await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Player projections inserted ({time.time()-_t:.1f}s)")
+
+        if _stop_after == 'players':
+            logger.info(f"[{league}] STOPPED after 'players' — {(time.time()-_start_time)/60:.1f} min "
+                        f"(skipped the fantasy tables and player prop probabilities)")
+            return Response(status_code=204)
 
         # ## **FPL / OPTA / FanTeam Points** (Premier League only)
         # Mirrors the block in projection_all_teams_service.py so daily

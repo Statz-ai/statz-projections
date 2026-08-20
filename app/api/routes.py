@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from app.repository.projection_run_repo import upsert_run_complete
 
@@ -148,6 +148,12 @@ async def _run_all_leagues(leagues=None, **_unused):
 async def _run_single_league(request):
     competition_id = _league_to_competition_id(request.league)
     started_at = datetime.now(timezone.utc).isoformat()
+    # A partial run deliberately leaves downstream tables holding the previous
+    # run's numbers, so it must not report itself as a healthy run: a 'success'
+    # row would clear a failed-comp alert and feed the pipeline-dead canary in
+    # ProjectionsFreshnessCheck. Nothing scheduled sets these flags.
+    _is_partial = bool(getattr(request, 'stop_after', None)
+                       or getattr(request, 'skip_datasets', False))
     try:
         if InternationalProjectionService.is_international_comp(request.league):
             await international_projection_service.projections(request)
@@ -156,11 +162,17 @@ async def _run_single_league(request):
         else:
             await projection_service.projections(request)
         finished_at = datetime.now(timezone.utc).isoformat()
-        await _report_status(competition_id, "success", started_at, finished_at, exit_code=0)
+        if _is_partial:
+            logger.info(f"[{request.league}] partial run finished — no projections_runs row written")
+        else:
+            await _report_status(competition_id, "success", started_at, finished_at, exit_code=0)
     except Exception as e:
         finished_at = datetime.now(timezone.utc).isoformat()
         logger.error(f"[{request.league}] projection FAILED: {e}", exc_info=True)
-        await _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
+        if _is_partial:
+            logger.error(f"[{request.league}] partial run failed — no projections_runs row written")
+        else:
+            await _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
     finally:
         _release_lock()
         logger.info("Projection lock released.")
@@ -168,11 +180,25 @@ async def _run_single_league(request):
 
 @router.post("")
 async def projections(request: LeagueRequest, background_tasks: BackgroundTasks):
-    """Start league projection in background - returns immediately, no timeout."""
+    """Start league projection in background - returns immediately, no timeout.
+
+    `stop_after` / `skip_datasets` make this a PARTIAL run — see
+    LeagueRequest. Validated here rather than in the background task so a
+    typo comes back as a 400 instead of dying silently after the lock is
+    taken.
+    """
+    if request.stop_after and request.stop_after not in ProjectionService.STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stop_after must be one of {list(ProjectionService.STAGES)}, got {request.stop_after!r}",
+        )
     if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
     background_tasks.add_task(_run_single_league, request)
-    return {"status": "started", "league": request.league}
+    resp = {"status": "started", "league": request.league}
+    if request.stop_after or request.skip_datasets:
+        resp["partial"] = {"stop_after": request.stop_after, "skip_datasets": bool(request.skip_datasets)}
+    return resp
 
 
 class FixtureProjectionRequest(BaseModel):
