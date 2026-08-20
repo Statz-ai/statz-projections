@@ -914,7 +914,20 @@ def _league_goal_averages(league_id, team_stats, fixtures, stats_types,
 
     # xG per side. A fixture needs both sides to qualify -- a one-sided row
     # would bias the ratio, which is the one thing the ratio cannot absorb.
+    #
+    # Prefer Sportmonks' own xG (id 999006) where the loader preserved it.
+    # That happens only for the Premier League, where _overlay_fpl_stats
+    # replaces xG with FPL/Opta values -- but FPL has per-fixture xG only from
+    # 2025/26, so a two-season window would otherwise be half Opta and half
+    # Sportmonks, two providers measured 0.18 apart on identical fixtures.
+    # A level built from one provider it shares with every other league beats
+    # a level built from two. Player projections keep the Opta values.
+    # Imported here, not at module scope: data_loader imports this module.
+    from app.data_loader import SM_XG_STAT_ID
+
     xg_id = get_stat_id('Expected Goals (xG)', stats_types)
+    if not team_stats.empty and (team_stats['stats_type_id'] == SM_XG_STAT_ID).any():
+        xg_id = SM_XG_STAT_ID
     xg = team_stats[team_stats['stats_type_id'] == xg_id][['fixture_id', 'team_id', 'value']]
     xg = xg.drop_duplicates(subset=['fixture_id', 'team_id'])
     df = fx.merge(xg.rename(columns={'team_id': 'h_tid', 'value': 'home_xg'}),

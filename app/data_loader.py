@@ -92,6 +92,26 @@ FPL_SNAPSHOT_MIN_PLAYERS = 400
 # 0.01 npxG behind, which is pure noise in a share denominator.
 PENALTY_XG = 0.79
 
+# Synthetic stats_type id holding Sportmonks' OWN xG for the Premier League,
+# snapshotted before _overlay_fpl_stats replaces it with FPL/Opta values.
+#
+# Why it exists: the overlay is PL-only (FPL covers no other league) and FPL
+# carries per-fixture xG only from 2025/26 — 2024/25 is 16,061 rows with the
+# column entirely NULL. So a PL goal-average window spanning two seasons was
+# built from Opta for the recent half and Sportmonks for the older half.
+# Measured 2026-08-20: exactly 51% of loaded PL xG rows differed from the DB,
+# matching the 380-of-750 season split, and the two providers sit 0.18 apart
+# on identical fixtures.
+#
+# The league goal averages want ONE provider across the whole window, and
+# Sportmonks is the one every other league uses. Player projections keep the
+# Opta values — they are per-player and better — so only the league-level
+# level/ratio reads this id. See stats_types_synthetic_ids memory note; 999001
+# is xA, 999002 CBI, 999003 CBIT, 999004 Non-Penalty Goals, 999005 npxG --
+# 999006 is the first free slot. These ids are NOT auto-increment; a collision
+# would silently feed xG rows into whatever consumer owns that id.
+SM_XG_STAT_ID = 999006
+
 
 class LeagueDataLoader:
     """Loads scoped data for projecting ONE competition.
@@ -802,6 +822,17 @@ class LeagueDataLoader:
             (cbi_id, "clearances_blocks_interceptions", "CBI"),
             (cbit_id, "cbit", "CBIT"),
         ]
+
+        # Snapshot Sportmonks' own team xG before the loop below overwrites
+        # it, so the league goal averages can stay on a single provider.
+        # Cheap: ~1.5k rows for a PL run, and only for the PL.
+        if xg_id is not None and self.team_stats is not None and not self.team_stats.empty:
+            sm_xg = self.team_stats[self.team_stats["stats_type_id"] == xg_id].copy()
+            if not sm_xg.empty:
+                sm_xg["stats_type_id"] = SM_XG_STAT_ID
+                self.team_stats = pd.concat([self.team_stats, sm_xg], ignore_index=True)
+                logger.info("[FPL overlay] preserved %d Sportmonks team xG rows as id %d",
+                            len(sm_xg), SM_XG_STAT_ID)
 
         results = []
         for stat_id, col, label in plan:
