@@ -413,6 +413,42 @@ def set_run_cutoff():
     return _RUN_CUTOFF
 
 
+# Per-call history memo.
+#
+# get_team_round_predictions asks for histories once per
+# (fixture x team x stat). But a team's own history depends only on
+# (stat, team, venue) and the opponent's history-against only on
+# (stat, opponent, opponent_venue) — neither depends on WHICH fixture is being
+# projected. A team appearing in N of the projected fixtures therefore has the
+# same numbers recomputed N times: on a 200-fixture Premier League run that was
+# ~12,000 calls producing ~1,200 distinct values.
+#
+# Armed and cleared around a single get_team_round_predictions call rather than
+# per run. That is deliberate: everything else the history depends on
+# (league_weightings, season_id, games, comp_id, ratings, and the stat frames)
+# is an argument to that call, so it is provably constant for exactly the
+# window the memo is alive. A run-scoped cache would have to prove the same
+# thing across euro-comp calls that legitimately pass different weightings.
+#
+# NEVER used when `as_of` is set. The model-dataset backfill computes each
+# fixture's history as of its own kickoff, so there the per-fixture repetition
+# is the whole point and the values genuinely differ.
+#
+# Exactness depends on the cutoff pin above: with a drifting cutoff the memo
+# would freeze the first value while the live path kept moving.
+_HISTORY_MEMO = None
+
+
+def _history_memo_arm():
+    global _HISTORY_MEMO
+    _HISTORY_MEMO = {}
+
+
+def _history_memo_disarm():
+    global _HISTORY_MEMO
+    _HISTORY_MEMO = None
+
+
 def _as_of_cutoff(as_of):
     import pandas as pd
     if as_of is not None:
@@ -1681,14 +1717,19 @@ def get_team_stat_histories(team, opponent, fixtures, stat, team_stats, teams, s
     `as_of` pins the history cutoff — see _as_of_cutoff. Leave it None for the
     live path.
     """
-    if venue is None:
+    # See _HISTORY_MEMO. Disabled outright on the as_of (backfill) path, where
+    # the same key legitimately yields different values per fixture.
+    memo = _HISTORY_MEMO if as_of is None else None
+    opponent_venue = None if venue is None else ('A' if venue == 'H' else 'H')
+    team_key = ('team', stat, team, venue)
+    opp_key = ('opp', stat, opponent, opponent_venue)
+
+    if memo is not None and team_key in memo:
+        team_history = memo[team_key]
+    elif venue is None:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
                                                  season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of)
-        opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
-                                                    ratings=ratings, comp_id=comp_id,
-                                                    league_weightings=league_weightings, season_id=season_id,
-                                                    games=games, comp_teams=comp_teams, as_of=as_of)
     else:
         team_history = get_team_weighted_average(
             stat, team, fixtures, team_stats, teams, stats_types, 0.98, ratings=ratings, comp_id=comp_id,
@@ -1697,7 +1738,17 @@ def get_team_stat_histories(team, opponent, fixtures, stat, team_stats, teams, s
             team, stat, fixtures, team_stats, teams, stats_types, venue, comp_id=comp_id, games=games * 2,
             season_id=season_id, comp_teams=comp_teams, as_of=as_of
         )
-        opponent_venue = 'A' if venue == 'H' else 'H'
+    if memo is not None:
+        memo[team_key] = team_history
+
+    if memo is not None and opp_key in memo:
+        opponent_history = memo[opp_key]
+    elif venue is None:
+        opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
+                                                    ratings=ratings, comp_id=comp_id,
+                                                    league_weightings=league_weightings, season_id=season_id,
+                                                    games=games, comp_teams=comp_teams, as_of=as_of)
+    else:
         opponent_history = get_opp_weighted_average(
             stat, opponent, fixtures, team_stats, teams, stats_types, 0.98, ratings=ratings, comp_id=comp_id,
             league_weightings=league_weightings, season_id=season_id, games=games, comp_teams=comp_teams, as_of=as_of
@@ -1705,6 +1756,9 @@ def get_team_stat_histories(team, opponent, fixtures, stat, team_stats, teams, s
             opponent, stat, fixtures, team_stats, teams, stats_types, opponent_venue, comp_id=comp_id, games=games * 2,
             season_id=season_id, comp_teams=comp_teams, as_of=as_of
         )
+    if memo is not None:
+        memo[opp_key] = opponent_history
+
     return team_history, opponent_history
 
 
@@ -1848,7 +1902,22 @@ def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stat
     return predictions
 
 
-def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams, stats_types, models, goals=False,
+def get_team_round_predictions(*args, **kwargs):
+    """Arms the history memo for the duration of one round of predictions.
+
+    Thin wrapper so the memo's lifetime is exactly this call — every input the
+    histories depend on is an argument here, so it can't shift underneath the
+    cache. try/finally rather than a plain clear at the end: an exception must
+    not leave the memo armed for whatever runs next.
+    """
+    _history_memo_arm()
+    try:
+        return _get_team_round_predictions(*args, **kwargs)
+    finally:
+        _history_memo_disarm()
+
+
+def _get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams, stats_types, models, goals=False,
                                ratings=None, comp_id=None, league_weightings=None, season_id=None, games=None,
                                neutral_venue=False, comp_teams=None):
     import pandas as pd
