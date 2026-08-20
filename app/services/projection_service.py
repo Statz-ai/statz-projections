@@ -105,6 +105,23 @@ class ProjectionService:
     # tapers toward the buffer's end (2026-07-09). Env-overridable for tuning.
     FANTASY_GAMEWEEKS = int(os.getenv("FANTASY_GAMEWEEKS", 19))
 
+    # Tiered horizon (2026-08-20). Re-deriving all 19 gameweeks on every run
+    # costs ~34 min for the Premier League, and the far half of that window
+    # cannot change between runs: gameweeks 7-19 are priced by nobody and are
+    # derived from team ratings, which only move when matches are played.
+    #
+    # So most runs project only the NEAR window — the gameweeks a user can
+    # actually act on — and a run promotes itself to the full horizon when a
+    # PL fixture has been played since the far gameweeks were last projected.
+    # That self-times to the matchday instead of a calendar, and it is
+    # self-healing: if a full pass fails, the condition is still true next run.
+    #
+    # NEAR_GAMEWEEKS mirrors the 6-gameweek display window on the Laravel side
+    # (App\Services\Fpl\Api\FplDisplayWindow::SIZE). Both spans get the same
+    # +1 buffer gameweek that the full horizon already used, so the fantasy
+    # filter still yields a full set after dropping a mid-flight gameweek.
+    NEAR_GAMEWEEKS = int(os.getenv("NEAR_GAMEWEEKS", 6))
+
     # Per-league data source for the current run. Set in _setup_league to
     # the fresh LeagueDataLoader. Read elsewhere (transfermarkt mappings,
     # promoted ratings, FPL player mappings) for auxiliary tables that
@@ -121,7 +138,7 @@ class ProjectionService:
 
     @staticmethod
     def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to,
-                                  fixture_ids=None):
+                                  fixture_ids=None, full_horizon=True):
         """Slice fixtures to the projection scope for `league`.
 
         `fixture_ids` — an explicit list from the caller. When present it is
@@ -181,12 +198,96 @@ class ProjectionService:
                 # +1 buffer GW over the fantasy horizon so the fantasy filter
                 # still yields a full FANTASY_GAMEWEEKS after dropping a
                 # mid-flight GW.
-                span = ProjectionService.FANTASY_GAMEWEEKS + 1
+                # Full horizon after a matchday; the near window otherwise.
+                # Same +1 buffer gameweek either way.
+                span = (ProjectionService.FANTASY_GAMEWEEKS if full_horizon
+                        else ProjectionService.NEAR_GAMEWEEKS) + 1
                 next_fix = future[future['gameweek_id'] < min_gw + span]
-                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+span-1} ({len(next_fix)} fixtures)")
+                logger.info(
+                    f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+span-1} "
+                    f"({len(next_fix)} fixtures, {'FULL horizon' if full_horizon else 'NEAR window'})"
+                )
                 return next_fix
             logger.warning(f"[{league}] gameweek_id missing/null — falling back to date-window")
         return fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
+
+    # A far-tier refresh is forced if it hasn't happened in this long, even
+    # with no matches played. Covers pre-season, when ratings still drift on
+    # odds and market values but no fixture completes to trigger condition B.
+    MAX_FAR_TIER_AGE_DAYS = 7
+
+    @staticmethod
+    async def _should_project_full_horizon(league_id: int, league: str) -> bool:
+        """True when this run should re-derive the WHOLE gameweek horizon.
+
+        Most runs only need the near window — gameweeks 7-19 are derived from
+        team ratings, and ratings only move when matches are played. So the
+        far tier is refreshed when, and only when, something could have
+        changed it:
+
+          A. it has never been projected            -> full
+          B. a fixture has been played since it was -> full  (the matchday signal)
+          C. it is older than MAX_FAR_TIER_AGE_DAYS -> full  (pre-season backstop)
+
+        Self-timing (no calendar to drift against fixtures) and self-healing
+        (a failed full pass leaves the condition true, so the next run does it).
+
+        Fails OPEN: any error returns True. Shrinking a run because a query
+        failed would silently stop refreshing the far gameweeks, which is the
+        one outcome with no visible symptom.
+        """
+        try:
+            conn = await get_source_connection()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """SELECT MIN(gameweek_id) FROM fixtures
+                            WHERE competition_id = %s AND gameweek_id IS NOT NULL
+                              AND kickoff_datetime >= NOW()""",
+                        (league_id,),
+                    )
+                    row = await cur.fetchone()
+                    min_gw = row[0] if row else None
+                    if min_gw is None:
+                        return True
+
+                    far_from = int(min_gw) + ProjectionService.NEAR_GAMEWEEKS + 1
+                    await cur.execute(
+                        """SELECT
+                             (SELECT MAX(f.kickoff_datetime) FROM fixtures f
+                               WHERE f.competition_id = %s AND f.kickoff_datetime < NOW()),
+                             (SELECT MAX(fp.updated_at) FROM fixture_projections fp
+                                JOIN fixtures f2 ON f2.id = fp.fixture_id
+                               WHERE f2.competition_id = %s AND f2.gameweek_id >= %s),
+                             NOW()""",
+                        (league_id, league_id, far_from),
+                    )
+                    last_played, far_at, now = await cur.fetchone()
+            finally:
+                release_source_connection(conn)
+
+            if far_at is None:
+                logger.info(f"[{league}] full horizon: GW {far_from}+ has never been projected")
+                return True
+            if last_played is not None and last_played > far_at:
+                logger.info(
+                    f"[{league}] full horizon: a fixture was played {last_played}, after the "
+                    f"far tier was last projected {far_at}"
+                )
+                return True
+            age_days = (now - far_at).total_seconds() / 86400.0
+            if age_days >= ProjectionService.MAX_FAR_TIER_AGE_DAYS:
+                logger.info(f"[{league}] full horizon: far tier is {age_days:.1f} days old")
+                return True
+
+            logger.info(
+                f"[{league}] near window: GW {far_from}+ current as of {far_at} "
+                f"({age_days:.1f} days), no fixture played since"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"[{league}] far-tier check failed ({e}) — projecting the full horizon")
+            return True
 
     @staticmethod
     def _fantasy_gw_filter(df, upcoming_gws):
@@ -1114,8 +1215,14 @@ class ProjectionService:
         # In[18]:
 
         _req_ids = getattr(league_request, 'fixture_ids', None)
+        # Tiered horizon: full after a matchday, near window in between. An
+        # explicit fixture list bypasses the gameweek window entirely, so the
+        # check is skipped for those runs.
+        _full_horizon = True
+        if not _req_ids:
+            _full_horizon = await ProjectionService._should_project_full_horizon(league_id, league)
         next_fix = ProjectionService._filter_upcoming_fixtures(
-            league, fixtures, date_from, date_to, _req_ids)
+            league, fixtures, date_from, date_to, _req_ids, full_horizon=_full_horizon)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
