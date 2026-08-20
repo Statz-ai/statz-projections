@@ -1,7 +1,8 @@
 # Projection services — design scope
 
-Written 2026-08-20. Status: **proposal, not started.** Needs George's sign-off
-before any code moves (Phase 1 changes published numbers).
+Written 2026-08-20. **Phases 0 and 1 are SHIPPED and deployed** (commits
+`9df184b`, `53dbc05`, `2026-08-20`) — see the status notes on each phase below.
+Phases 2–4 remain proposals.
 
 ## Why now
 
@@ -223,17 +224,21 @@ service honours.
 
 Each is independently shippable. Only Phase 1 changes published numbers.
 
-### Phase 0 — delete the five dead endpoints
+### Phase 0 — delete the five dead endpoints — ✅ SHIPPED 2026-08-20
 Remove `fixtures()`, `predicted_table()`, `teams()`, `players()`,
 `player_props()` from `projection_service.py` and their five routes.
 
 - **~3,285 lines deleted; 7 copies of the blend → 2.**
 - Output impact: **none.** Nothing calls them.
-- Verify: `grep` for the five paths across both repos (done — clean); one
-  nightly run before/after should be byte-identical.
-- Effort: ~1 hour.
+- Confirmed unused before deleting, by measurement not inspection: all six
+  methods log `_prepare_league mode=` and only `projections()` writes a
+  `projections_runs` row, so a call to any of the five would log without a
+  matching row. Over 14 days of production traffic: **743 log lines, 743
+  rows.** Post-deploy all five return 404; `/api/projections/fixture` still
+  answers.
+- Result: `projection_service.py` 6,346 → 3,060 lines.
 
-### Phase 1 — make the all-leagues loop delegate
+### Phase 1 — make the all-leagues loop delegate — ✅ SHIPPED 2026-08-20
 In the domestic branch of `projectionAllTeams`, do what the euro and intl
 branches already do:
 
@@ -249,9 +254,12 @@ Keep `touch_all_running` / `upsert_run_complete` around the call. Delete the
   same numbers as the nightly — gaining the guardrail, the goals cascade,
   Dixon-Coles, team dials, the bonus simulator and FPL stale-row cleanup.
   This is the sign-off item.
-- Verify: run one league both ways and diff. `.compare_baseline.py` +
-  `.baseline_2026_08_19.csv` in the repo root already do this.
-- Effort: ~half a day including verification.
+- Verified on prod: League Two through the button logged
+  `team dials applied: Exeter City…` and `24 team(s) carry odds in their
+  rating — guardrail moderates the overlap by distance`. Neither line could
+  appear on the old path. 6.2 min vs 5.7–7.5 min for the same league on the
+  nightly. `projections_runs` row written as success.
+- Result: `projection_all_teams_service.py` 2,056 → 199 lines.
 
 ### Phase 2 — extract the stages
 Pure refactor of `projections()` into the Layer 2 functions. No logic change.
@@ -297,12 +305,13 @@ also the only other caller of `/all-leagues` besides the admin button.
 
 ---
 
-## Part 6 — decisions needed from George
+## Part 6 — decisions
 
-1. **Phase 1 output change.** Run All Leagues will start matching the
-   nightly. Agreed?
-2. **Phase 0 deletion.** Five endpoints with no callers — delete outright, or
-   keep one (`/fixtures`) as a manual debugging hook?
-3. **Appetite for Phase 2.** Phases 0+1 kill the drift for ~half a day of
-   work. Phase 2 is the ~2-day tidy that makes `lean` re-runs possible for
-   domestic leagues. Worth it now, or park it?
+1. ~~**Phase 1 output change.**~~ Agreed by George 2026-08-20 and shipped.
+   Run All Leagues now matches the nightly.
+2. ~~**Phase 0 deletion.**~~ Deleted outright, after the 743/743 measurement
+   above.
+3. **Open: appetite for Phase 2.** The ~2-day tidy that extracts named stages
+   from the 2,070-line `projections()` and gives domestic comps the
+   `lean` / `ratings_only` partial re-runs internationals already have.
+   Nothing depends on it — Phases 0+1 already killed the drift.
