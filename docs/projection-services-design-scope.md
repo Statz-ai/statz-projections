@@ -288,15 +288,22 @@ failed-comp alert and feed the pipeline-dead canary while downstream tables
 still held the previous run's numbers.
 
 **What this does NOT do:** extract the stages into functions. `projections()`
-is still one ~2,100-line method. The remaining value of Phase 2 is therefore
-structural only — testability, and being able to compose stages the way the
-international pipeline does. Decide whether that's worth it on its own merits
-now the capability is in.
+is still one ~2,100-line method.
 
-### Phase 3 — converge euro on the shared stages (optional)
-Once stages exist, `euro_comp_projection_service` keeps its own ratings
-builder and scoping but composes the shared stages for fixtures/teams/
-players. Only worth doing if Phase 2 lands cleanly.
+**Phase 2 (the extraction) is PARKED as of 2026-08-20.** Its value rested on
+two things: the partial-re-run capability, which 2a delivered without it, and
+letting the other pipelines compose the same stages, which George has ruled
+out (Phase 3). What's left is testability of one method — not worth ~2 days.
+Revisit only if the domestic pipeline needs stage-level unit tests for their
+own sake.
+
+### Phase 3 — converge euro on the shared stages — ❌ DROPPED 2026-08-20
+George's call, and it overrides what I proposed here: the euro and
+international pipelines are **slightly different in their logic, not just
+their inputs** — they stay separate. Do not revisit this as if it were an
+oversight.
+
+This also removes most of the case for Phase 2 below.
 
 ### Phase 4 — housekeeping
 `cron_projections.sh` (repo root) posts to `/api/projections/fetch-data`,
@@ -338,6 +345,6 @@ also the only other caller of `/all-leagues` besides the admin button.
    re-run leagues without having to do the full run, good for testing"* —
    that capability shipped as Phase 2a above, in about an hour rather than
    two days, because it needed stop points rather than a refactor.
-4. **Open: is the structural half of Phase 2 still wanted?** Extracting named
-   stage functions out of `projections()` buys testability and composability,
-   but no new capability now that 2a is in.
+4. ~~**Is the structural half of Phase 2 still wanted?**~~ No — parked
+   2026-08-20. George ruled out sharing stages across pipelines (they differ
+   in logic, not just inputs), which leaves only single-method testability.
