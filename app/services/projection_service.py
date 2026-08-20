@@ -120,8 +120,25 @@ class ProjectionService:
     _strength_inputs = {}
 
     @staticmethod
-    def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to):
+    def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to,
+                                  fixture_ids=None):
         """Slice fixtures to the projection scope for `league`.
+
+        `fixture_ids` — an explicit list from the caller. When present it is
+        an INSTRUCTION, not a hint: those fixtures are selected directly from
+        everything upcoming, bypassing both the date window and the Premier
+        League gameweek window. Previously the list was intersected with the
+        date window afterwards, which silently discarded anything outside it.
+
+        That mismatch was live and costly. `ProjectionTriggerEvaluator` looks
+        7 days ahead in season but **21 in pre-season** (added 2026-08-03 so a
+        league did not sit un-projected all summer), while PROJECTION_DAYS is
+        5. So in pre-season the scheduler kept dispatching fixtures 6-21 days
+        out, this filter threw every one of them away, and the run completed
+        "successfully" having projected nothing. Because they stayed
+        unprojected they were re-dispatched next cycle, so Serie A and Ligue 1
+        burned a full run every pass from at least 17 Aug producing zero
+        output. Logged as "Filtered to 0 of 10 fixtures".
 
         Premier League: project FANTASY_GAMEWEEKS+1 upcoming gameweeks
         (gameweek_id-based). Aligns with the FPL gameweek concept and feeds
@@ -147,6 +164,16 @@ class ProjectionService:
         """
         fixtures = fixtures.copy()
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
+
+        if fixture_ids:
+            future = fixtures[fixtures['kickoff_datetime'] >= pd.to_datetime('today')]
+            picked = future[future['id'].isin(fixture_ids)]
+            logger.info(
+                f"[{league}] explicit fixture list: {len(fixture_ids)} requested, "
+                f"{len(picked)} upcoming and projectable"
+            )
+            return picked
+
         if league == 'Premier League':
             future = fixtures[fixtures['kickoff_datetime'] >= pd.to_datetime('today')]
             if not future.empty and 'gameweek_id' in future.columns and pd.notna(future['gameweek_id'].min()):
@@ -1064,11 +1091,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
@@ -3117,11 +3143,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
@@ -3366,11 +3391,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
@@ -3793,11 +3817,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
@@ -4521,11 +4544,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
@@ -5469,11 +5491,10 @@ class ProjectionService:
 
         # In[18]:
 
-        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
+        _req_ids = getattr(league_request, 'fixture_ids', None)
+        next_fix = ProjectionService._filter_upcoming_fixtures(
+            league, fixtures, date_from, date_to, _req_ids)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
-            next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
-            logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
         next_fix = next_fix[
             ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
              'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
