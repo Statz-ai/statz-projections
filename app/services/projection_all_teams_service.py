@@ -95,8 +95,9 @@ class ProjectionAllTeams:
                     _start_time = time.time()
                     request = LeagueRequest(league=league)
                     await _euro_comp_service.projections(request)
-                    _league_times[league] = round(time.time() - _start_time, 1)
-                    logger.info(f"[{league}] DONE in {_league_times[league]}s")
+                    _elapsed_s = time.time() - _start_time
+                    _league_times[league] = _elapsed_s / 60
+                    logger.info(f"[{league}] DONE in {_elapsed_s:.1f}s")
                     await upsert_run_complete(
                         competition_id=_league_slug,
                         status='success',
@@ -116,8 +117,9 @@ class ProjectionAllTeams:
                     _start_time = time.time()
                     request = LeagueRequest(league=league)
                     await _intl_service.projections(request)
-                    _league_times[league] = round(time.time() - _start_time, 1)
-                    logger.info(f"[{league}] DONE in {_league_times[league]}s")
+                    _elapsed_s = time.time() - _start_time
+                    _league_times[league] = _elapsed_s / 60
+                    logger.info(f"[{league}] DONE in {_elapsed_s:.1f}s")
                     await upsert_run_complete(
                         competition_id=_league_slug,
                         status='success',
@@ -127,7 +129,9 @@ class ProjectionAllTeams:
                     )
                     continue
 
-                logger.info(f"[{league}] START projections"); _start_time = time.time()
+                # projections() logs its own START / COMPLETE lines; this
+                # timer exists only to feed the end-of-run summary table.
+                _start_time = time.time()
 
                 # Delegate to the domestic pipeline, exactly as the euro and
                 # international branches above delegate to theirs. This loop
@@ -149,9 +153,7 @@ class ProjectionAllTeams:
                 # which is what this loop was doing anyway.
                 await _domestic_service.projections(LeagueRequest(league=league))
 
-                _league_elapsed = (time.time() - _start_time) / 60
-                _league_times[league] = _league_elapsed
-                logger.info(f"[{league}] COMPLETE - {_league_elapsed:.1f} min")
+                _league_times[league] = (time.time() - _start_time) / 60
                 await upsert_run_complete(
                     competition_id=_league_slug,
                     status='success',
