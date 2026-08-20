@@ -23,6 +23,7 @@ If we return None, the caller falls back to its existing 1X2-only path.
 """
 
 import math
+import os
 from typing import Optional, Tuple
 
 import logging
@@ -428,6 +429,46 @@ def _rank_and_lambdas(
 
     # No goals-ladder data → caller falls back to its own 1X2-only path
     return None
+
+
+# --- Odds guardrail -------------------------------------------------------
+#
+# Replaces the old fixed-weight blend (w = odds_beta, or 0 when the rating
+# already carried the market) for the domestic services. Instead of one
+# weight for the whole fixture, each SIDE gets its own weight derived from
+# how far that side's λ sits from the book's λ for the same side:
+#
+#     gap = |λ_model - λ_book| / max(λ_book, FLOOR)
+#     w   = MAX * gap^2 / (gap^2 + K^2)
+#
+# Properties that motivated this shape (agreed with George 2026-08-20):
+#   * quadratic at the origin, so fixtures we already agree with are left
+#     essentially untouched without needing an arbitrary dead band;
+#   * K is the gap at which half of MAX is taken — the one interpretable
+#     knob;
+#   * MAX is an asymptote, never reached, so a published λ is never simply
+#     the book's number;
+#   * relative rather than absolute, because goal expectations are
+#     multiplicative — a 0.25 error means something very different on a
+#     0.6 side than on a 2.5 side. FLOOR stops small denominators from
+#     inflating the gap on low-scoring sides.
+#
+# It also subsumes the old double-counting gate: where a rating already
+# absorbed the market, our λ lands near the book's λ, the gap is small and
+# the weight is small automatically — no explicit suppression needed.
+GUARDRAIL_K = float(os.getenv("ODDS_GUARDRAIL_K", "0.15"))
+GUARDRAIL_MAX = float(os.getenv("ODDS_GUARDRAIL_MAX", "0.60"))
+GUARDRAIL_FLOOR = float(os.getenv("ODDS_GUARDRAIL_FLOOR", "1.0"))
+
+
+def guardrail_weight(lambda_model: float, lambda_bookie: float) -> float:
+    """Per-side blend weight from relative distance to the book's λ."""
+    denom = max(float(lambda_bookie), GUARDRAIL_FLOOR)
+    if denom <= 0:
+        return 0.0
+    gap = abs(float(lambda_model) - float(lambda_bookie)) / denom
+    g2 = gap * gap
+    return GUARDRAIL_MAX * g2 / (g2 + GUARDRAIL_K * GUARDRAIL_K)
 
 
 def blend_lambdas(
@@ -877,6 +918,7 @@ def compute_final_goals_and_probs(
     odds_weight: float,
     boost: float,
     rho: float = 0.0,
+    guardrail: bool = False,
 ) -> Tuple[float, float, float, float, float]:
     """Single entry point for the goal-blend logic across all 3 services.
 
@@ -894,6 +936,10 @@ def compute_final_goals_and_probs(
     goals_odds: nested dict keyed by bookmaker → {match, home, away}.
     odds_weight: per-service blend weight (0.3 domestic/WC, 0.5 euro comp).
     boost: draw-bias multiplier (1.1 across all services today).
+    guardrail: when True, ignore odds_weight on paths 1-3 and derive a
+        per-SIDE weight from each side's distance to the book instead
+        (see guardrail_weight). Domestic services pass True; the
+        international and euro-comp services still pass a flat weight.
     """
     # Zero weight means the caller wants no market influence on GOALS at all
     # — the outright odds are already inside the team rating and applying
@@ -907,7 +953,7 @@ def compute_final_goals_and_probs(
     #
     # The H/D/A still come from get_result_probs so downstream percentages
     # keep their usual shape, including any Dixon-Coles correction.
-    if not odds_weight:
+    if not odds_weight and not guardrail:
         from app.services.statz_functions import get_result_probs
         h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost, rho)
         return lambda_h_model, lambda_a_model, h, d, a
@@ -921,9 +967,23 @@ def compute_final_goals_and_probs(
     if bookie_lambdas is not None:
         # Paths 1 / 1.5 / 2 / 3 — blend in goal space.
         lh_b, la_b = bookie_lambdas
-        new_h, new_a = blend_lambdas(
-            lambda_h_model, lambda_a_model, lh_b, la_b, odds_weight,
-        )
+        if guardrail:
+            # Each side is pulled on its own merit: a fixture where we have
+            # the home team right and the away team badly wrong moves only
+            # the away number. blend_lambdas takes a single w, so call it
+            # once per side and keep the side that call is responsible for.
+            w_h = guardrail_weight(lambda_h_model, lh_b)
+            w_a = guardrail_weight(lambda_a_model, la_b)
+            new_h, _ = blend_lambdas(
+                lambda_h_model, lambda_a_model, lh_b, la_b, w_h,
+            )
+            _, new_a = blend_lambdas(
+                lambda_h_model, lambda_a_model, lh_b, la_b, w_a,
+            )
+        else:
+            new_h, new_a = blend_lambdas(
+                lambda_h_model, lambda_a_model, lh_b, la_b, odds_weight,
+            )
         # Compute final H/D/A from the blended λs so they're internally
         # consistent with the output goals.
         ph, pd_, pa = _hda_from_lambdas(new_h, new_a)
@@ -950,6 +1010,21 @@ def compute_final_goals_and_probs(
     if bookie_1x2_pct is None:
         # PATH 5 — no odds at all. Use model unchanged; emit model H/D/A.
         from app.services.statz_functions import get_result_probs
+        h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost, rho)
+        return lambda_h_model, lambda_a_model, h, d, a
+
+    if guardrail:
+        # PATH 4 has 1X2 but no goals ladder, so there are no per-side bookie
+        # λs to measure a gap against. The guardrail only ever intervenes on
+        # a demonstrated distance, so with nothing to measure it declines to
+        # act rather than falling back to a flat blend. Logged because this
+        # path covers 0 of 87 currently-priced fixtures — if that changes,
+        # the decision is worth revisiting.
+        from app.services.statz_functions import get_result_probs
+        logger.info(
+            "[guardrail] fixture %s has 1X2 but no goals ladder — leaving model unblended",
+            fixture_id,
+        )
         h, d, a = get_result_probs(lambda_h_model, lambda_a_model, boost, rho)
         return lambda_h_model, lambda_a_model, h, d, a
 

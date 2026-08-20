@@ -1125,23 +1125,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -1197,23 +1195,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3176,23 +3175,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3248,23 +3245,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3417,23 +3415,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3491,23 +3487,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -3844,23 +3841,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -3916,23 +3911,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -4571,23 +4567,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -4643,23 +4637,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
@@ -5518,23 +5513,21 @@ class ProjectionService:
 
         # Market content must reach a fixture ONCE. Where the unified rating
         # already took an outright-odds component, blending bookie lambdas
-        # again at the goals step applies the same view twice — the rating
-        # says a team is strong BECAUSE the book does, then the fixture is
-        # dragged toward the book on top of that.
+        # again at the goals step would apply the same view twice — the
+        # rating says a team is strong BECAUSE the book does, then the
+        # fixture is dragged toward the book on top of that.
         #
-        # Deliberately a goals-only weight, NOT odds_beta itself: odds_beta
-        # also drives the team-stat blend (corners/cards/shots) and the whole
-        # player-prop ladder, which take their odds from markets the rating
-        # never saw and must keep blending. Only the goals step is a repeat.
-        #
-        # Leagues whose rating got no odds component keep the fixture blend
-        # exactly as before, so this is per-league and self-selecting.
+        # This used to be handled by suppressing the blend outright for such
+        # teams. The guardrail handles it by distance instead: a rating that
+        # already absorbed the market produces a λ close to the book's, so
+        # the gap is small and the weight is small without needing to know
+        # where the information came from. Kept only for the log line, which
+        # is still the quickest way to see which leagues are in that state.
         _rating_used_odds = bool((ProjectionService._strength_inputs or {}).get('rating_used_odds'))
         _odds_teams = (ProjectionService._strength_inputs or {}).get('odds_teams') or set()
-        goals_odds_weight = 0.0 if _rating_used_odds else odds_beta
         if _rating_used_odds:
-            logger.info(f"[{league}] goals blend suppressed per fixture — "
-                        f"{len(_odds_teams)} team(s) carry odds in their rating")
+            logger.info(f"[{league}] {len(_odds_teams)} team(s) carry odds in their "
+                        f"rating — guardrail moderates the overlap by distance")
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
@@ -5590,23 +5583,24 @@ class ProjectionService:
                     float(score_preds['Away Odds %'][i]) / 100.0,
                 )
             fixture_id = int(next_fix['id'].iloc[i])
-            # Suppress only where BOTH teams already carry the market in their
-            # rating. In a thin league most do not, and those fixtures keep the
-            # blend rather than losing the market entirely.
-            _fx_weight = goals_odds_weight
-            if _rating_used_odds and _odds_teams:
-                _both = (str(next_fix['home_team'].iloc[i]) in _odds_teams
-                         and str(next_fix['away_team'].iloc[i]) in _odds_teams)
-                _fx_weight = 0.0 if _both else odds_beta
+            # The odds guardrail replaces the old binary suppression here.
+            # That gate asked "did the market already reach this fixture
+            # through the rating"; the guardrail asks "is this side far
+            # enough from the book to be worth pulling back", which answers
+            # the double-counting question implicitly — a rating that
+            # absorbed the market lands near the book, so its gap and its
+            # weight are both small. odds_beta is passed for signature
+            # compatibility only; paths 1-3 ignore it under guardrail=True.
             new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
                 compute_final_goals_and_probs(
                     fixture_id,
                     float(home_goals), float(away_goals),
                     bookie_1x2_pct,
                     goals_odds_map.get(fixture_id, {}),
-                    _fx_weight,
+                    odds_beta,
                     boost,
                     dixon_coles_rho,
+                    guardrail=True,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
