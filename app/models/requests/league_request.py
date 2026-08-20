@@ -50,9 +50,17 @@ class LeagueRequest(BaseModel):
     # failed-comp alert or feed the pipeline-dead canary in
     # ProjectionsFreshnessCheck. Nothing scheduled sets it.
     stop_after: Optional[str] = None
-    # Skip the two analytics dataset writes (model dataset ~2m02s, accuracy
-    # dataset ~47s on PL). They feed retraining and accuracy tracking; nothing
-    # downstream in the same run reads them, so dropping them is safe for a
-    # test run and saves ~2m49s. Leave False for anything whose numbers you
-    # intend to keep.
+    # Skip the two analytics dataset writes. They feed model retraining and
+    # accuracy tracking; nothing downstream in the same run reads them.
+    #
+    # This is for DATA HYGIENE, not speed — measured at ~12s on a League Two
+    # run (6.1 min with, 5.9 without). An earlier version of this comment
+    # claimed ~2m49s: that came from reading the gap between two log lines,
+    # and the gap is nearly all get_team_round_predictions (the team-stat
+    # model inference) sitting between them, not the dataset build.
+    #
+    # The reason to use it is that a throwaway test run otherwise appends
+    # rows to the datasets that retraining and the accuracy metrics are
+    # computed from. Set it on anything whose numbers you don't intend to
+    # keep.
     skip_datasets: Optional[bool] = False

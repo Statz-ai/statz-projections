@@ -1509,8 +1509,9 @@ class ProjectionService:
         ## NEW - Add historical stats to the model dataset and drop them from team projections afterwards
 
         # Analytics only — feeds retraining, and nothing downstream in this
-        # run reads it. ~2m02s on a PL run. The History columns it harvests
-        # are dropped from team_projections just below either way.
+        # run reads it. Cheap (seconds); skipped to keep throwaway test runs
+        # out of the retraining pool, not to save time. The History columns it
+        # harvests are dropped from team_projections just below either way.
         if not _skip_datasets:
             new_rows = []
 
@@ -1885,7 +1886,8 @@ class ProjectionService:
         # In[ ]:
 
         # Analytics only — feeds accuracy tracking, and nothing downstream
-        # in this run reads it. ~47s on a PL run.
+        # in this run reads it. Cheap; skipped to keep throwaway test runs out
+        # of the accuracy metrics, not to save time.
         if not _skip_datasets:
             ## NEW - Update projection accuracy dataset
 
