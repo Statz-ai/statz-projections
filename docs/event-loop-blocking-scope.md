@@ -131,6 +131,39 @@ nothing more, so a subprocess model fits the existing shape.
 
 ---
 
+## ✅ SHIPPED AND VERIFIED 2026-08-20
+
+Two workers deployed ~13:47 UTC (`049d1df`). Probed throughout a real Ligue 1
+projection: **25 of 25 probes returned 200, all under 14ms**, against a 71%
+failure rate on one worker. The run completed clean — 9 fixtures, 3.5 minutes,
+no errors.
+
+Memory came in cheaper than estimated: working worker **0.42 GB** peak, idle
+worker **0.12 GB**, host free 6 GB and unchanged. The reason is worth keeping:
+the flock means only one worker ever loads a league, so peak is *(one run + one
+idle worker)*, not double a run. That is also why the April failure mode cannot
+recur — that was two workers **eagerly** loading a DataCache at startup, a
+class that no longer exists.
+
+**Two corrections to the original safety case**, recorded because a future
+reader deserves the accurate version:
+
+1. The claim that two workers "already ran successfully in production" was
+   wrong. The worker count has flip-flopped four times, and `fafcf66` was
+   reverted by `a32784d` **the same afternoon**, 2h21m later, on an OOM. The
+   safety case rests entirely on the DataCache being gone — verified — and not
+   on precedent.
+2. The `to_csv` sweep missed live `to_parquet` writes at
+   `data_loader.py:1703-1721` and `projection_service.py:293`. Both were
+   checked and neither is on the projection write path, so the conclusion
+   stands, but the sweep should have caught them.
+
+**Still untested:** the 02:00 full run, which adds the accuracy gap-fill and
+metrics and includes the Premier League (~33 min, 200 fixtures). Capture with
+`ps -eo rss,args | grep "[g]unicorn" | sort -rn | head -2`.
+
+---
+
 ## Recommendation
 
 **Do A.** The measurement removed the only reason not to: memory was the
