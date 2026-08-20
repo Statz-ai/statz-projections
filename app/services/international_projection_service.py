@@ -39,7 +39,7 @@ import numpy as np
 from scipy.stats import poisson
 
 from app.services.international_ratings import compute_international_ratings
-from app.services.statz_functions import get_result_probs, find_inputs_for_probs
+from app.services.statz_functions import get_result_probs, find_inputs_for_probs, set_run_cutoff
 from app.services.tournament_configs import WC_2026
 from app.services.tournament_simulation_service import TournamentSimulator
 from app.services.international_team_stat_service import InternationalTeamStatService
@@ -399,6 +399,9 @@ class InternationalProjectionService:
                 f"Known: {sorted(INTL_SCOPES.keys())}"
             )
         scope = INTL_SCOPES[league_name]
+        # Pin this run's history cutoff before any history is computed, and so
+        # a cutoff pinned by a previous run in the same process is never reused.
+        set_run_cutoff()
 
         # Per-fixture mode (set via LeagueRequest.fixture_ids) skips
         # the slow fixture-independent / bracket-wide steps:

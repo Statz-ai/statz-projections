@@ -1108,7 +1108,10 @@ class ProjectionService:
                 f"expected one of {', '.join(ProjectionService.STAGES)}"
             )
 
-        logger.info(f'[{league}] START projections')
+        # Pin the history cutoff for this run — see statz_functions.set_run_cutoff.
+        # Must happen before any history is computed.
+        _pinned = set_run_cutoff()
+        logger.info(f'[{league}] START projections (history cutoff pinned {_pinned})')
         if _stop_after or _skip_datasets:
             logger.warning(
                 f"[{league}] PARTIAL RUN — stop_after={_stop_after or 'none'} "

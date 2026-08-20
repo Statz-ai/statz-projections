@@ -382,9 +382,44 @@ def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None, 
 # while being worthless. Threading it here (rather than reimplementing the
 # weighted-average maths in a backfill script) keeps training features and
 # serving features computed by exactly the same code.
+# Per-run history cutoff.
+#
+# `pd.to_datetime('today')` returns the CURRENT TIMESTAMP on pandas 2.x, not
+# midnight — verified on the container's 2.2.1: two calls two seconds apart
+# differ. Every history window is measured from it as
+# `(date_from - kickoff).dt.days // 7`, so on a long run (the PL team-stat
+# stage alone is ~21 min) a historical fixture whose age crosses a 7-day
+# boundary mid-run would be weighted differently depending on WHEN in the run
+# it was computed. Same team, same stat, two different answers.
+#
+# In practice it rarely fires — Championship and Premier League baselines both
+# came back byte-identical across back-to-back runs — but "rarely" is not a
+# property you can build on. Pinning the cutoff once per run makes a run
+# reproducible by construction, which is what lets the history memo be exact
+# rather than merely lucky.
+#
+# Set at the top of every projection entry point, never cleared: each run
+# overwrites it before doing any work, so a stale value from a previous run
+# can't be read. Safe because the server holds a global projection lock and
+# runs one league at a time.
+_RUN_CUTOFF = None
+
+
+def set_run_cutoff():
+    """Pin the history cutoff for the run that is about to start."""
+    global _RUN_CUTOFF
+    import pandas as pd
+    _RUN_CUTOFF = pd.to_datetime('today')
+    return _RUN_CUTOFF
+
+
 def _as_of_cutoff(as_of):
     import pandas as pd
-    return pd.to_datetime('today') if as_of is None else pd.to_datetime(as_of)
+    if as_of is not None:
+        return pd.to_datetime(as_of)
+    # Falls back to live 'today' if no run pinned one — keeps any path that
+    # doesn't go through an entry point behaving exactly as it did before.
+    return _RUN_CUTOFF if _RUN_CUTOFF is not None else pd.to_datetime('today')
 
 
 def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,

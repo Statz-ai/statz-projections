@@ -116,7 +116,11 @@ class EuroCompProjectionService:
     async def projections(self, league_request):
         league = league_request.league or 'Champions League'
         _start_time = time.time()
-        logger.info(f'[{league}] START euro comp projections')
+        # Pin this run's history cutoff before any history is computed. Also
+        # stops a cutoff pinned by a PREVIOUS run in the same process from
+        # being reused — every entry point sets its own.
+        _pinned = set_run_cutoff()
+        logger.info(f'[{league}] START euro comp projections (history cutoff pinned {_pinned})')
 
         data_folder_path = EuroCompProjectionService.DATA_FOLDER_PATH
         model_file_path = EuroCompProjectionService.MODEL_FILE_PATH
