@@ -2589,9 +2589,7 @@ class ProjectionService:
                         _n_dials = apply_band_dials(_xm_profiles, _fpl_dials)
                         if _n_dials:
                             logger.info(f"[{league}] FPL dials: bands replaced for {_n_dials} players")
-                        _fpl_frame = _fpl_base.copy()
-                        _fpl_frame = stamp_xmin_columns(_fpl_frame, _xm_profiles,
-                                                        confirmed_xi=_confirmed_lineups)
+                        # Frame construction happens once, in _assemble_fpl_frame below.
 
                         # BPS static rates (George, 2026-08-03): successful
                         # dribbles + big chances missed are player traits, not
@@ -2628,8 +2626,7 @@ class ProjectionService:
                                 _rates[_col] = compute_per90_rates(
                                     player_stats, _sid, _pos_by_pid, fixture_ids=_rate_fx,
                                 )
-                            if _rates:
-                                _fpl_frame = stamp_rate_columns(_fpl_frame, _rates)
+                            _stamp_rate_columns = stamp_rate_columns   # for the assembler below
                         except Exception as _rate_err:
                             # Non-fatal: nothing consumes these columns until the
                             # BPS rebuild lands, and a run must not die for them.
@@ -2645,25 +2642,8 @@ class ProjectionService:
                                 (r['player_id'], _P90_ALIASES.get(r['stat_name'], r['stat_name'])): r['m_bar']
                                 for r in _per90_collector if r.get('m_bar')
                             }
-                            _fpl_frame = apply_per90_scaling(_fpl_frame, _m_bar_lookup)
                             logger.info(f"[{league}] FPL per-90 points path ON — "
                                         f"{len(_m_bar_lookup)} (player, stat) m̄ terms")
-                            # Prove the per-90 companions are on the LIVE frame
-                            # rather than inferring it from a unit test. The
-                            # bonus simulator reads these; a stat missing one
-                            # contributes 0 to BPS. Identity checked on a real
-                            # row: col == per90 x xmin_bands / 90.
-                            _p90_cols = [c for c in _fpl_frame.columns if c.endswith(' per90')]
-                            _p90_chk = 'n/a'
-                            if _p90_cols and 'xmin_bands' in _fpl_frame.columns:
-                                _c0 = _p90_cols[0][:-len(' per90')]
-                                if _c0 in _fpl_frame.columns:
-                                    _lhs = pd.to_numeric(_fpl_frame[_c0], errors='coerce')
-                                    _rhs = (pd.to_numeric(_fpl_frame[_p90_cols[0]], errors='coerce')
-                                            * pd.to_numeric(_fpl_frame['xmin_bands'], errors='coerce') / 90.0)
-                                    _p90_chk = 'OK' if bool((_lhs - _rhs).abs().max() < 1e-6) else 'MISMATCH'
-                            logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
-                                        f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
 
                         # Penalty-taker cascade from FPL's designated order,
                         # BEFORE the dials so a panel override still wins. Must
@@ -2687,10 +2667,8 @@ class ProjectionService:
                                         int(_o),
                                         None if (_w is None or pd.isna(_w)) else float(_w),
                                     )
-                            if _pen_map:
-                                _fpl_frame = apply_penalty_order_shares(
-                                    _fpl_frame, _pen_map, team_projections)
-                            else:
+                            _apply_penalty_order_shares = apply_penalty_order_shares  # for the assembler
+                            if not _pen_map:
                                 logger.warning(f"[{league}] no penalties_order rows — "
                                                "penalty shares left on history")
                         except Exception as _pen_err:
@@ -2703,16 +2681,85 @@ class ProjectionService:
                         # share of the team's defensive-contribution total, so
                         # it feeds the hit rate as a RATE and must be in place
                         # before the threshold maths runs. George, 2026-08-04.
-                        _fpl_frame = apply_share_dials(_fpl_frame, _fpl_dials, team_projections)
+                        # Defaults so the assembler cannot NameError. Each of these is built
+                        # inside a try/except above, and a failure there must degrade one step
+                        # rather than take the whole FPL block down.
+                        _rates = locals().get('_rates') or {}
+                        _m_bar_lookup = locals().get('_m_bar_lookup') or {}
+                        _pen_map = locals().get('_pen_map') or {}
+                        _stamp_rate_columns = locals().get('_stamp_rate_columns')
+                        _apply_penalty_order_shares = locals().get('_apply_penalty_order_shares')
+
+                        def _assemble_fpl_frame(profiles, *, confirmed_xi, dials, label):
+                            """The FPL assembly sequence, in one place, so the LIVE frame and the
+                            bundle snapshot cannot drift apart.
+
+                            They are the same five steps from the same base — the only differences
+                            are which minutes profiles they start from and whether share dials are
+                            applied. Writing that out twice is what caused this:
+
+                              dc_rate90 was added to the live frame and to BUNDLE_COLS on
+                              2026-08-04 and missed on the bundle frame. save_assembly_bundles
+                              only writes columns that EXIST, so it was silently dropped from
+                              every bundle; recalc needs it to re-band the DefCon threshold, and
+                              without it scored the rate as 0 and wrote def_con_pct = 0 over
+                              good values. 192 players sat at zero DefCon. The same duplication
+                              had also dropped stamp_rate_columns from the bundle, so recalc
+                              scored dribbles and big chances missed at 0 too.
+
+                            Dials are applied BEFORE the DC recompute: defcon_share is a share of
+                            the team defensive total and feeds the hit rate as a RATE, so it has
+                            to be in place before the threshold maths (George, 2026-08-04).
+
+                            The DC rate is banked as its own column first — .apply(axis=1) hands
+                            the function a COPY of each row, so stashing it back onto `row` would
+                            silently write nothing.
+                            """
+                            _f = _fpl_base.copy()
+                            _f = stamp_xmin_columns(_f, profiles, confirmed_xi=confirmed_xi)
+                            if _rates and _stamp_rate_columns is not None:
+                                _f = _stamp_rate_columns(_f, _rates)
+                            if _m_bar_lookup:
+                                _f = apply_per90_scaling(_f, _m_bar_lookup)
+                            if _pen_map and _apply_penalty_order_shares is not None:
+                                try:
+                                    _f = _apply_penalty_order_shares(_f, _pen_map, team_projections)
+                                except Exception as _e:
+                                    logger.warning(f"[{league}] {label}: penalty shares skipped: {_e}")
+                            if dials is not None:
+                                _f = apply_share_dials(_f, dials, team_projections)
+                            _f[_TD_DC_RATE_COL] = _f.apply(_td_dc_rate90, axis=1)
+                            _f['CBIT Hit Rate'] = _f.apply(_td_cbit_hit_rate, axis=1)
+                            _f['def_con_pct'] = (_f['CBIT Hit Rate'] * 100).round(2)
+                            return _f
+
+                        _assemble_fpl = _assemble_fpl_frame   # visible to the bundle block below
+                        _fpl_frame = _assemble_fpl_frame(
+                            _xm_profiles, confirmed_xi=_confirmed_lineups,
+                            dials=_fpl_dials, label="live")
+                        # Prove the per-90 companions are on the LIVE frame rather than
+                        # inferring it from a unit test. The bonus simulator reads these; a
+                        # stat missing one contributes 0 to BPS. Identity on a real row:
+                        # col == per90 x xmin_bands / 90. Runs AFTER assembly — checking a
+                        # half-built frame reported 0 companions and proved nothing.
+                        _p90_cols = [c for c in _fpl_frame.columns if c.endswith(' per90')]
+                        _p90_chk = 'n/a'
+                        if _p90_cols and 'xmin_bands' in _fpl_frame.columns:
+                            _c0 = _p90_cols[0][:-len(' per90')]
+                            if _c0 in _fpl_frame.columns:
+                                _lhs = pd.to_numeric(_fpl_frame[_c0], errors='coerce')
+                                _rhs = (pd.to_numeric(_fpl_frame[_p90_cols[0]], errors='coerce')
+                                        * pd.to_numeric(_fpl_frame['xmin_bands'], errors='coerce') / 90.0)
+                                _p90_chk = 'OK' if bool((_lhs - _rhs).abs().max() < 1e-6) else 'MISMATCH'
+                        logger.info(f"[{league}] per-90 companions on frame: {len(_p90_cols)} "
+                                    f"(identity {_p90_chk}) — {sorted(_p90_cols)[:4]}")
                         # Team-down DC hit rate on the exposure-scaled inputs so
                         # def_con_pct is minutes-aware, and on the dialled rate
                         # where a dial is set. The rate is banked as its own
                         # column first — .apply(axis=1) hands the function a COPY
                         # of each row, so a function that tried to stash it back
                         # onto `row` would silently write nothing.
-                        _fpl_frame[_TD_DC_RATE_COL] = _fpl_frame.apply(_td_dc_rate90, axis=1)
-                        _fpl_frame['CBIT Hit Rate'] = _fpl_frame.apply(_td_cbit_hit_rate, axis=1)
-                        _fpl_frame['def_con_pct'] = (_fpl_frame['CBIT Hit Rate'] * 100).round(2)
+                        # (assembled above by _assemble_fpl_frame)
                         # Persist the model's DC share so the dials panel has a
                         # slider baseline for EVERY position. Computed here
                         # because it needs the assembled rate and the team
@@ -2750,42 +2797,16 @@ class ProjectionService:
                 try:
                     from app.repository.fpl_recalc_repo import save_assembly_bundles
                     if _xmin_enabled and '_model_profiles' in dir():
-                        _bundle_frame = _fpl_base.copy()
-                        _bundle_frame = stamp_xmin_columns(_bundle_frame, _model_profiles, confirmed_xi=None)
-                        if _per90_collector:
-                            _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
-
-                        # dc_rate90 MUST be stamped here too, not just on
-                        # _fpl_frame. It is in BUNDLE_COLS, but save_assembly_
-                        # bundles only writes columns that exist on the frame,
-                        # so without this line it was silently dropped from
-                        # every bundle — and recalc needs it to re-band the
-                        # DefCon threshold. Missing, recalc scored the rate as
-                        # 0 and wrote def_con_pct = 0 straight into
-                        # fpl_projections.
+                        # Same assembler as the live frame, with MODEL profiles and no dials —
+                        # that is the entire difference between the two, and it is now the only
+                        # difference expressible. Recalc layers current dials onto this baseline
+                        # from scratch, so Reset-to-model is instant and consecutive edits always
+                        # compose from fresh model values.
                         #
-                        # Maguire is the case: bundle def_con_pct 20.07, live
-                        # rows 0.00, and the panel's own preview (which
-                        # recomputes from share x team CBIT) said 27% — so his
-                        # total jumped 3.4 points the moment the row went dirty
-                        # and the preview replaced the stored zero. 192 players
-                        # were sitting at all-zero DefCon. George, 2026-08-21.
-                        _bundle_frame[_TD_DC_RATE_COL] = _bundle_frame.apply(_td_dc_rate90, axis=1)
-                        _bundle_frame['CBIT Hit Rate'] = _bundle_frame.apply(_td_cbit_hit_rate, axis=1)
-                        _bundle_frame['def_con_pct'] = (_bundle_frame['CBIT Hit Rate'] * 100).round(2)
-                        # Penalty cascade on the SNAPSHOT too. Recalc re-derives it on load,
-                        # so this is idempotent and cannot double-count — but without it the
-                        # bundle carries raw HISTORICAL penalty shares while the live points
-                        # carry cascade ones, and the two silently disagree. That gap cost an
-                        # evening: measuring the bundle read as "penalties 25% light" when the
-                        # live numbers were correct all along.
-                        try:
-                            from app.services.fpl_penalties import apply_penalty_order_shares
-                            if _pen_map:
-                                _bundle_frame = apply_penalty_order_shares(
-                                    _bundle_frame, _pen_map, team_projections)
-                        except Exception as _bpen_err:
-                            logger.warning(f"[{league}] bundle penalty shares skipped: {_bpen_err}")
+                        # No confirmed-XI snap: the bundle is the standing model, and a confirmed
+                        # lineup is a per-fixture fact that belongs to the live frame.
+                        _bundle_frame = _assemble_fpl(
+                            _model_profiles, confirmed_xi=None, dials=None, label="bundle")
                         await save_assembly_bundles(_bundle_frame, score_preds, team_projections)
                 except Exception as _bundle_err:
                     logger.warning(f"[{league}] assembly-bundle snapshot failed (non-fatal): {_bundle_err}")
