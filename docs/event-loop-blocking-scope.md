@@ -158,9 +158,28 @@ reader deserves the accurate version:
    checked and neither is on the projection write path, so the conclusion
    stands, but the sweep should have caught them.
 
-**Still untested:** the 02:00 full run, which adds the accuracy gap-fill and
-metrics and includes the Premier League (~33 min, 200 fixtures). Capture with
-`ps -eo rss,args | grep "[g]unicorn" | sort -rn | head -2`.
+### ✅ Full run confirmed 2026-08-21
+
+300 samples across 01:55–02:55, covering twelve competitions run back to back
+— Championship (9.3 min), La Liga, Serie A, Bundesliga, League One, Scottish
+Premiership, MLS, Campeonato Brasileiro, Süper Lig, Saudi Pro League,
+Eredivisie, Liga Portugal. All completed successfully.
+
+| | |
+|---|---|
+| Blocked probes | **0 of 300** |
+| Peak single worker | 0.65 GB |
+| Peak combined | **1.11 GB** against ~7 GB available |
+
+An hour of continuous projections without the server going deaf once, against
+71% blocked on a single worker. Memory sits at roughly a sixth of headroom.
+
+**The one gap:** the Premier League ran at 14:54, outside the capture window,
+so the single heaviest league (15.3 min) has not been directly probed. The
+mechanism does not depend on which league — a longer run is more of the same,
+not different in kind — and a 9.3-minute Championship run inside the window
+blocked nothing. Worth a confirming sample if anyone happens to be watching
+during a PL run, but not worth arranging.
 
 ---
 
