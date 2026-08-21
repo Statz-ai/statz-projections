@@ -472,9 +472,17 @@ class EuroCompProjectionService:
             _pre = len(next_fix)
             _home_league = next_fix['home_team'].astype(str).str.strip().map(_team_league)
             _away_league = next_fix['away_team'].astype(str).str.strip().map(_team_league)
-            next_fix = next_fix[
-                _home_league.notna() & _away_league.notna() & (_home_league == _away_league)
-            ].reset_index(drop=True)
+            _keep = _home_league.notna() & _away_league.notna() & (_home_league == _away_league)
+            next_fix = next_fix[_keep].copy()
+            # Both clubs share this league — stamped so the goal baseline can
+            # be taken per league rather than pooled (see below).
+            next_fix['_scope_league'] = _home_league[_keep]
+            # League-major ordering so the per-league score_preds concat below
+            # stays aligned with next_fix, which downstream code indexes into
+            # positionally. Cosmetic reordering, cup scope only.
+            next_fix = next_fix.sort_values(
+                by=['_scope_league', 'kickoff_datetime', 'home_team']
+            ).reset_index(drop=True)
             if _pre - len(next_fix):
                 logger.info(
                     f'[{league}] same-league only: kept {len(next_fix)} of {_pre} ties, '
@@ -513,7 +521,31 @@ class EuroCompProjectionService:
         avg_away_goals = np.mean(avg_away_goals_list) if avg_away_goals_list else 1.2
         logger.info(f"[{league}] Goal averages: avg_home={avg_home_goals:.3f} avg_away={avg_away_goals:.3f} (from {len(avg_home_goals_list)} top-5 leagues)")
 
-        score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
+        if scope.same_league_only and '_scope_league' in next_fix.columns and not next_fix.empty:
+            # Both clubs in each tie share a division, so the correct Poisson
+            # baseline is that division's own rate — no estimation needed.
+            # It matters: measured over 3 years, the Premier League runs 2.99
+            # goals a game while the Championship, League One and League Two
+            # all sit at 2.53-2.60. Pooling the four would push League Two
+            # ties up by roughly 0.4 goals.
+            #
+            # groupby iterates keys in sorted order and next_fix is sorted on
+            # the same key above, so the concat lands in next_fix's order —
+            # which downstream code relies on, indexing the two positionally.
+            _parts = []
+            for _lg, _grp in next_fix.groupby('_scope_league', sort=True):
+                _lid = get_league_id(_lg, comps)
+                _h = get_home_goal_avg(_lid, team_stats, fixtures_df, stats_types, standings, seasons)
+                _a = get_away_goal_avg(_lid, team_stats, fixtures_df, stats_types, standings, seasons)
+                if _h is None or np.isnan(_h):
+                    _h = avg_home_goals
+                if _a is None or np.isnan(_a):
+                    _a = avg_away_goals
+                logger.info(f"[{league}] {_lg}: {len(_grp)} tie(s), baseline home={_h:.3f} away={_a:.3f}")
+                _parts.append(make_round_goal_prediction(_grp, ratings, _h, _a))
+            score_preds = pd.concat(_parts, ignore_index=True)
+        else:
+            score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
 
         boost = 1.1
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
