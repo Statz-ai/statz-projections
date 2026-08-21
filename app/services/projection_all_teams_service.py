@@ -90,7 +90,7 @@ class ProjectionAllTeams:
             await touch_all_running()
             try:
                 # Delegate euro comps to dedicated service
-                if EuroCompProjectionService.is_euro_comp(league):
+                if EuroCompProjectionService.handles(league):
                     logger.info(f"[{league}] Delegating to EuroCompProjectionService")
                     _start_time = time.time()
                     request = LeagueRequest(league=league)

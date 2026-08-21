@@ -3,6 +3,7 @@ import logging
 import time
 from scipy.stats import poisson
 import warnings
+from dataclasses import dataclass
 
 from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
@@ -31,39 +32,80 @@ class EuroCompProjectionService:
 
     EURO_COMPS = ['Champions League', 'Europa League', 'Conference League', 'Europa Conference League']
 
-    # Top-5 league competition_ids — used as the baseline for the
-    # Poisson goal averages in euro-comp projections (avg_home_goals /
-    # avg_away_goals). Averaging across all 15 LEAGUE_COUNTRY_DICT
-    # entries pulled the baseline toward smaller-league scoring rates
-    # (Eliteserien/Allsvenskan etc.) that don't reflect realistic
-    # scoring at the euro-comp level. Decision: 2026-05-27.
-    TOP_5_LEAGUE_IDS = [8, 564, 384, 82, 301]  # PL, La Liga, Serie A, Bundesliga, Ligue 1
+    # ── Multi-league scopes ───────────────────────────────────────────────
+    #
+    # This service exists for competitions whose teams come from SEVERAL
+    # domestic leagues, so ratings built inside each league have to be put on
+    # one scale before they can meet. That is true of the European comps and
+    # equally true of the domestic cups, which pair clubs from four tiers.
+    #
+    # Registered as scopes rather than copied into a second service: a fourth
+    # parallel implementation of the fixture pipeline is exactly what was
+    # deleted on 2026-08-20 (see docs/projection-services-design-scope.md).
+    #
+    #   leagues              — domestic leagues supplying teams. Each MUST have
+    #                          team_ratings rows and a competition_projection_config
+    #                          row, or the scale step has nothing to anchor on.
+    #   goal_avg_league_ids  — which leagues set the Poisson baseline. Euro comps
+    #                          use the top 5 only: including smaller leagues
+    #                          pulled PSG/Arsenal projections toward Nordic
+    #                          scoring rates (2026-05-27).
+    #   coefficient          — how ratings are made comparable across leagues.
+    #                          'uefa' reads competitions.uefa_coefficient_index.
+    #                          'flat' applies 1.0, i.e. no cross-league scaling
+    #                          at all — only valid while same_league_only is on.
+    #   same_league_only     — project only ties where both clubs are in the SAME
+    #                          domestic league. Those need no cross-league bridge:
+    #                          the two ratings are already mutually consistent, so
+    #                          the tie is arithmetically a league game.
+    #   days                 — how far ahead to look. Cup rounds are weeks apart,
+    #                          so the 5-day domestic window would never see them.
+    @dataclass(frozen=True)
+    class MultiLeagueScope:
+        comps: tuple
+        leagues: tuple
+        goal_avg_league_ids: tuple
+        coefficient: str = 'uefa'
+        same_league_only: bool = False
+        days: int = 5
 
-    # Domestic top tiers in scope for Euro-comp cross-league ratings.
-    # Every league here MUST have:
-    #   - team_ratings rows (so the rescale step has data to anchor on)
-    #   - a competition_projection_config row (so the cross-league
-    #     weighting / transfermarkt-code lookup resolves)
-    # Confirmed 2026-05-21 for all 15 entries below.
-    LEAGUE_COUNTRY_DICT = {
-        'Premier League':       'England',
-        'La Liga':               'Spain',
-        'Serie A':               'Italy',
-        'Bundesliga':            'Germany',
-        'Ligue 1':               'France',
-        'Eredivisie':            'Netherlands',
-        'Liga Portugal':         'Portugal',
-        'Scottish Premiership':  'Scotland',
-        # added 2026-05-21 — every one has clubs in current UCL/UEL/UECL
-        # and full team_ratings + projection_config coverage.
-        'Austrian Bundesliga':   'Austria',
-        'Belgian Pro League':    'Belgium',
-        'Eliteserien':           'Norway',
-        'Super League':          'Switzerland',
-        'Super Lig':             'Turkey',
-        'Superliga':             'Denmark',
-        'Allsvenskan':           'Sweden',
+    # NOTE the cup scope is deliberately incomplete: with coefficient='flat'
+    # and same_league_only=True it projects 6 of the 23 upcoming Carabao ties
+    # (measured 2026-08-21). The other 17 are cross-tier and need a real
+    # coefficient — that is the next step, and it is isolated to one field.
+    SCOPES = {
+        'euro': MultiLeagueScope(
+            comps=('Champions League', 'Europa League', 'Conference League',
+                   'Europa Conference League'),
+            leagues=('Premier League', 'La Liga', 'Serie A', 'Bundesliga', 'Ligue 1',
+                     'Eredivisie', 'Liga Portugal', 'Scottish Premiership',
+                     'Austrian Bundesliga', 'Belgian Pro League', 'Eliteserien',
+                     'Super League', 'Super Lig', 'Superliga', 'Allsvenskan'),
+            goal_avg_league_ids=(8, 564, 384, 82, 301),
+            coefficient='uefa',
+        ),
+        'domestic_cup': MultiLeagueScope(
+            comps=('Carabao Cup', 'FA Cup'),
+            leagues=('Premier League', 'Championship', 'League One', 'League Two'),
+            goal_avg_league_ids=(8, 9, 12, 14),
+            coefficient='flat',
+            same_league_only=True,
+            days=21,
+        ),
     }
+
+    @staticmethod
+    def scope_for(league: str):
+        for scope in EuroCompProjectionService.SCOPES.values():
+            if league in scope.comps:
+                return scope
+        return None
+
+    # The former TOP_5_LEAGUE_IDS and LEAGUE_COUNTRY_DICT constants moved into
+    # SCOPES above (2026-08-21) when domestic cups joined this service — two
+    # scopes need two sets of values, and leaving the constants behind would
+    # have been a second source of truth. Their reasoning is preserved in the
+    # SCOPES comments; LEAGUE_COUNTRY_DICT's country values were never read.
 
     @staticmethod
     def _read_df(path_no_ext: str) -> pd.DataFrame:
@@ -78,6 +120,12 @@ class EuroCompProjectionService:
     @staticmethod
     def is_euro_comp(league: str) -> bool:
         return league in EuroCompProjectionService.EURO_COMPS
+
+    @staticmethod
+    def handles(league: str) -> bool:
+        """True for any competition this service projects — euro comps and
+        the domestic cups. Routing should ask this, not is_euro_comp."""
+        return EuroCompProjectionService.scope_for(league) is not None
 
     @staticmethod
     async def _resolve_upcoming_fixture_teams(comp_id: int, date_from, date_to):
@@ -120,24 +168,27 @@ class EuroCompProjectionService:
         # stops a cutoff pinned by a PREVIOUS run in the same process from
         # being reused — every entry point sets its own.
         _pinned = set_run_cutoff()
-        logger.info(f'[{league}] START euro comp projections (history cutoff pinned {_pinned})')
+        scope = EuroCompProjectionService.scope_for(league)
+        if scope is None:
+            raise ValueError(f"{league!r} is not a registered multi-league scope")
+        logger.info(f'[{league}] START multi-league projections (history cutoff pinned {_pinned})')
 
         data_folder_path = EuroCompProjectionService.DATA_FOLDER_PATH
         model_file_path = EuroCompProjectionService.MODEL_FILE_PATH
         save_file_path = EuroCompProjectionService.SAVE_FILE_PATH
 
         date_from = pd.to_datetime('today')
-        date_to = date_from + pd.DateOffset(days=EuroCompProjectionService.DAYS)
+        date_to = date_from + pd.DateOffset(days=scope.days)
         odds_weight = 0.5
 
         # Euro comp scope spans the comp itself + 8 domestic top-tiers
-        # (LEAGUE_COUNTRY_DICT). Resolve IDs up-front via direct DB queries,
+        # (scope.leagues). Resolve IDs up-front via direct DB queries,
         # then pass them to LeagueDataLoader so the team scope covers all
         # relevant clubs.
         from app.services.projection_service import ProjectionService
         comp_id_for_load = await ProjectionService._resolve_league_id_db(league)
         domestic_ids = []
-        for dom_league in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys():
+        for dom_league in scope.leagues:
             domestic_ids.append(await ProjectionService._resolve_league_id_db(dom_league))
         league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
 
@@ -211,7 +262,7 @@ class EuroCompProjectionService:
         uefa_coef['Coefficient Index'] = pd.to_numeric(uefa_coef['Coefficient Index'], errors='coerce')
 
         comp_id = get_league_id(league, comps)
-        league_ids = [get_league_id(l, comps) for l in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys()]
+        league_ids = [get_league_id(l, comps) for l in scope.leagues]
 
         # Shadow capture deliberately SKIPPED for euro comps. Scope spans
         # the comp + 8 domestic top tiers → 10k+ players, 8M+ player_stat
@@ -266,7 +317,7 @@ class EuroCompProjectionService:
                 subset=['competition_id', 'team_id'], keep='first'
             )
 
-        for league_name, country in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.items():
+        for league_name in scope.leagues:
             league_id = get_league_id(league_name, comps)
 
             if isinstance(latest_ratings_by_id, pd.DataFrame):
@@ -291,20 +342,30 @@ class EuroCompProjectionService:
             # Try DB first (competitions.uefa_coefficient_index, added
             # 2026-04-22 migration), fall back to League Coefficients.xlsx
             # for any league not yet backfilled in DB.
-            comp_row = comps[comps['id'] == league_id]
-            db_coef = comp_row['uefa_coefficient_index'].iloc[0] if (
-                not comp_row.empty and 'uefa_coefficient_index' in comps.columns
-                and pd.notna(comp_row['uefa_coefficient_index'].iloc[0])
-            ) else None
-            if db_coef is not None:
-                coef = float(db_coef)
+            if scope.coefficient == 'flat':
+                # No cross-league scaling. Only sound because same_league_only
+                # is on: within one league the ratings are already mutually
+                # consistent, so a tie between two clubs from it is
+                # arithmetically a league game. The moment cross-tier ties are
+                # projected this MUST become a real coefficient — an EFL tier
+                # gap is not 1.0 and pretending otherwise would hand League Two
+                # sides Premier League strength.
+                coef = 1.0
             else:
-                xlsx_match = uefa_coef[uefa_coef['League'] == league_name]['Coefficient Index']
-                if xlsx_match.empty:
-                    logger.warning(f"[{league}] No UEFA coefficient for {league_name} in DB or xlsx — defaulting to 1.0")
-                    coef = 1.0
+                comp_row = comps[comps['id'] == league_id]
+                db_coef = comp_row['uefa_coefficient_index'].iloc[0] if (
+                    not comp_row.empty and 'uefa_coefficient_index' in comps.columns
+                    and pd.notna(comp_row['uefa_coefficient_index'].iloc[0])
+                ) else None
+                if db_coef is not None:
+                    coef = float(db_coef)
                 else:
-                    coef = xlsx_match.values[0]
+                    xlsx_match = uefa_coef[uefa_coef['League'] == league_name]['Coefficient Index']
+                    if xlsx_match.empty:
+                        logger.warning(f"[{league}] No UEFA coefficient for {league_name} in DB or xlsx — defaulting to 1.0")
+                        coef = 1.0
+                    else:
+                        coef = xlsx_match.values[0]
             ratings['League'] = league_name
             ratings['coef'] = coef
             ratings['Attack'] *= coef
@@ -318,7 +379,7 @@ class EuroCompProjectionService:
         ratings_df.sort_values(by='Overall', ascending=False, inplace=True)
         ratings = ratings_df.copy()
 
-        logger.info(f'[{league}] Ratings built for {len(ratings)} teams across {len(EuroCompProjectionService.LEAGUE_COUNTRY_DICT)} leagues')
+        logger.info(f'[{league}] Ratings built for {len(ratings)} teams across {len(scope.leagues)} leagues')
 
         # Save UEFA-coefficient-adjusted ratings to the team_ratings DB table
         # under the euro comp's competition_id. This replaces the previous
@@ -397,6 +458,29 @@ class EuroCompProjectionService:
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
+        # Domestic cups, step 1: only ties where both clubs are in the SAME
+        # domestic league. Those need no cross-league bridge — the two ratings
+        # were built inside one league and are already mutually consistent, so
+        # the tie is arithmetically a league game. Cross-tier ties are dropped
+        # rather than projected wrong; they need a real tier coefficient, which
+        # is the next step and is isolated to scope.coefficient.
+        #
+        # Placed after home_team/away_team are resolved from ids — the ratings
+        # frame is keyed on team NAME.
+        if scope.same_league_only:
+            _team_league = dict(zip(ratings['Team'].astype(str).str.strip(), ratings['League']))
+            _pre = len(next_fix)
+            _home_league = next_fix['home_team'].astype(str).str.strip().map(_team_league)
+            _away_league = next_fix['away_team'].astype(str).str.strip().map(_team_league)
+            next_fix = next_fix[
+                _home_league.notna() & _away_league.notna() & (_home_league == _away_league)
+            ].reset_index(drop=True)
+            if _pre - len(next_fix):
+                logger.info(
+                    f'[{league}] same-league only: kept {len(next_fix)} of {_pre} ties, '
+                    f'dropped {_pre - len(next_fix)} cross-tier or unrated'
+                )
+
         # Drop fixtures where teams don't have ratings
         drop_indices = []
         for i in range(len(next_fix)):
@@ -414,13 +498,13 @@ class EuroCompProjectionService:
         logger.info(f'[{league}] Projecting {len(next_fix)} fixtures...')
 
         # Goal averages from the top-5 leagues only (PL, La Liga, Serie A,
-        # Bundesliga, Ligue 1). All 15 LEAGUE_COUNTRY_DICT entries get
+        # Bundesliga, Ligue 1). All scope.leagues entries get
         # ratings, but smaller leagues' goal rates don't reflect realistic
         # euro-comp scoring — using them in the Poisson baseline pulled
         # PSG/Arsenal/etc.'s projections toward Nordic / Austrian averages.
         # NaN-filter keeps the math safe for between-season leagues whose
         # team_stats might return None.
-        _goal_avg_pool = [lid for lid in EuroCompProjectionService.TOP_5_LEAGUE_IDS if lid in league_ids]
+        _goal_avg_pool = [lid for lid in scope.goal_avg_league_ids if lid in league_ids]
         avg_home_goals_list = [get_home_goal_avg(lid, team_stats, fixtures_df, stats_types, standings, seasons) for lid in _goal_avg_pool]
         avg_away_goals_list = [get_away_goal_avg(lid, team_stats, fixtures_df, stats_types, standings, seasons) for lid in _goal_avg_pool]
         avg_home_goals_list = [v for v in avg_home_goals_list if v is not None and not np.isnan(v)]
@@ -562,14 +646,20 @@ class EuroCompProjectionService:
             if len(team_league) == 0:
                 continue
             team_league = team_league[0]
-            league_rating = uefa_coef[uefa_coef['League'] == team_league]['Coefficient Index'].values[0]
+            # Read the coefficient the ratings were actually built with rather
+            # than re-deriving it from uefa_coef: EFL tiers have no UEFA index,
+            # so that lookup returns an empty frame and .values[0] raises.
+            # Identical for euro comps — ratings['coef'] was set from the same
+            # source in the loop above. Under a flat scope both sides are 1.0,
+            # so diff is 0 and the adjustment below is a no-op.
+            league_rating = ratings.loc[ratings['Team'] == team, 'coef'].values[0]
 
             opponent = team_projections['Opponent'].iloc[i]
             opp_league = ratings.loc[ratings['Team'] == opponent, 'League'].values
             if len(opp_league) == 0:
                 continue
             opp_league = opp_league[0]
-            opp_league_rating = uefa_coef[uefa_coef['League'] == opp_league]['Coefficient Index'].values[0]
+            opp_league_rating = ratings.loc[ratings['Team'] == opponent, 'coef'].values[0]
 
             diff = (opp_league_rating - league_rating)
             team_projections.at[team_projections.index[i], 'Shots Total'] = (team_projections['Shots Total'].iloc[i] / (diff + 1)).round(2)

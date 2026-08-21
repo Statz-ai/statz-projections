@@ -157,7 +157,7 @@ async def _run_single_league(request):
     try:
         if InternationalProjectionService.is_international_comp(request.league):
             await international_projection_service.projections(request)
-        elif EuroCompProjectionService.is_euro_comp(request.league):
+        elif EuroCompProjectionService.handles(request.league):
             await euro_comp_service.projections(request)
         else:
             await projection_service.projections(request)
