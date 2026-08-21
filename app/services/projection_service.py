@@ -2755,6 +2755,22 @@ class ProjectionService:
                         if _per90_collector:
                             _bundle_frame = apply_per90_scaling(_bundle_frame, _m_bar_lookup)
 
+                        # dc_rate90 MUST be stamped here too, not just on
+                        # _fpl_frame. It is in BUNDLE_COLS, but save_assembly_
+                        # bundles only writes columns that exist on the frame,
+                        # so without this line it was silently dropped from
+                        # every bundle — and recalc needs it to re-band the
+                        # DefCon threshold. Missing, recalc scored the rate as
+                        # 0 and wrote def_con_pct = 0 straight into
+                        # fpl_projections.
+                        #
+                        # Maguire is the case: bundle def_con_pct 20.07, live
+                        # rows 0.00, and the panel's own preview (which
+                        # recomputes from share x team CBIT) said 27% — so his
+                        # total jumped 3.4 points the moment the row went dirty
+                        # and the preview replaced the stored zero. 192 players
+                        # were sitting at all-zero DefCon. George, 2026-08-21.
+                        _bundle_frame[_TD_DC_RATE_COL] = _bundle_frame.apply(_td_dc_rate90, axis=1)
                         _bundle_frame['CBIT Hit Rate'] = _bundle_frame.apply(_td_cbit_hit_rate, axis=1)
                         _bundle_frame['def_con_pct'] = (_bundle_frame['CBIT Hit Rate'] * 100).round(2)
                         # Penalty cascade on the SNAPSHOT too. Recalc re-derives it on load,
