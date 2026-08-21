@@ -468,7 +468,29 @@ class EuroCompProjectionService:
         # Placed after home_team/away_team are resolved from ids — the ratings
         # frame is keyed on team NAME.
         if scope.same_league_only:
-            _team_league = dict(zip(ratings['Team'].astype(str).str.strip(), ratings['League']))
+            # Which league each club actually plays in = the scope league it
+            # holds its MOST RECENT rating for.
+            #
+            # Not dict(zip(ratings['Team'], ratings['League'])): `ratings` is
+            # sorted by Overall before this point, so for a club with rows in
+            # two tiers that dict resolves last-wins by RATING, not by league.
+            # Southampton carries a stale Premier League rating from May plus a
+            # current Championship one; it resolved to Premier League while
+            # West Ham resolved to Championship, so a Championship-vs-
+            # Championship tie was silently dropped as cross-tier.
+            _scope_ids = {get_league_id(l, comps): l for l in scope.leagues}
+            _lr = latest_ratings_by_id
+            if isinstance(_lr, pd.DataFrame) and not _lr.empty:
+                _lr = _lr[_lr['competition_id'].isin(_scope_ids.keys())]
+                _lr = _lr.sort_values('Date', ascending=False).drop_duplicates(
+                    subset=['team_id'], keep='first'
+                )
+                _team_league = dict(zip(
+                    _lr['Team'].astype(str).str.strip(),
+                    _lr['competition_id'].map(_scope_ids),
+                ))
+            else:
+                _team_league = {}
             _pre = len(next_fix)
             _home_league = next_fix['home_team'].astype(str).str.strip().map(_team_league)
             _away_league = next_fix['away_team'].astype(str).str.strip().map(_team_league)
