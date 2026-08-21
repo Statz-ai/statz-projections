@@ -76,8 +76,26 @@ SCORE_PRED_COLS = ['id', 'Home Team', 'Away Team', 'Home Goals', 'Away Goals',
 
 
 async def save_assembly_bundles(frame, score_preds, team_predictions):
-    """Replace all bundles with this run's snapshot (PL-only feature, so a
-    full swap is correct: DELETE + insert)."""
+    """Replace THIS RUN'S fixtures in the bundle snapshot.
+
+    Scoped to the fixtures the run actually wrote, NOT a full table wipe.
+
+    It used to be `DELETE FROM fpl_assembly_bundles`, justified as "PL-only
+    feature, so a full swap is correct". That holds for a full run and fails
+    completely for a partial one. On 2026-08-21 a single-fixture re-projection
+    fired when confirmed lineups landed for the 19:00 kick-off, and it deleted
+    all 11,740 bundle rows and replaced them with 60 — one fixture.
+
+    Two things broke, one of them silently:
+      - the admin dials panel reads its team projections (tg/ta/tcbit/trec)
+        from the player_id=0 context rows, so every ghost line under the
+        sliders went blank;
+      - RECALC loads from bundles, so ~495 of 554 players would have come back
+        "no_bundle" on the next Update.
+
+    Deleting per fixture keeps a partial run honest: it replaces its own
+    fixtures and leaves every other fixture's snapshot alone.
+    """
     def _clean(d):
         # json.dumps emits literal NaN for float('nan') (allow_nan default),
         # which MySQL's JSON type rejects ("Invalid JSON text ... position
@@ -119,10 +137,19 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
     if not rows:
         return 0
 
+    # Fixtures this run is about to write. Anything else in the table belongs
+    # to a fixture this run did not touch and must survive.
+    _fixture_ids = sorted({int(r[0]) for r in rows})
     conn = await get_connection()
     try:
         async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM fpl_assembly_bundles")
+            for _i in range(0, len(_fixture_ids), 500):
+                _chunk = _fixture_ids[_i:_i + 500]
+                _ph = ",".join(["%s"] * len(_chunk))
+                await cur.execute(
+                    f"DELETE FROM fpl_assembly_bundles WHERE fixture_id IN ({_ph})",
+                    tuple(_chunk),
+                )
         await conn.commit()
     finally:
         if _db.pool:
@@ -135,7 +162,8 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
     ON DUPLICATE KEY UPDATE payload = new.payload, updated_at = NOW()
     """
     affected = await execute_chunked(sql, rows, label="[fpl_assembly_bundles]")
-    logger.info(f"[fpl_assembly_bundles] snapshotted {len(rows)} rows")
+    logger.info(f"[fpl_assembly_bundles] snapshotted {len(rows)} rows "
+                f"across {len(_fixture_ids)} fixtures (other fixtures untouched)")
     return affected
 
 
