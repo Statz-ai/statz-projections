@@ -107,6 +107,23 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
 
     rows = []
     present = [c for c in BUNDLE_COLS if c in frame.columns]
+    # BUNDLE_COLS is a CONTRACT, but this filter is deliberately tolerant —
+    # some columns are PL-only and some only exist when the per-90 path is on,
+    # so a hard failure would kill the snapshot for a league that legitimately
+    # lacks them. The cost of that tolerance is that a column can be declared
+    # essential and silently dropped, which is exactly what happened to
+    # dc_rate90: added to BUNDLE_COLS and to the live frame on 2026-08-04,
+    # missed on the bundle frame, dropped here without a word. Recalc then
+    # scored DefCon as 0 for 192 players for weeks, and it surfaced only
+    # because George nudged a slider 1% and the panel disagreed by 3.4 points.
+    #
+    # So: still tolerant, but never silent. Naming the absentees turns "why is
+    # this number wrong" into one line of the run log.
+    _absent = [c for c in BUNDLE_COLS if c not in frame.columns]
+    if _absent:
+        logger.warning(
+            "[fpl_assembly_bundles] %d BUNDLE_COLS missing from the frame — "
+            "recalc will score these as 0: %s", len(_absent), ", ".join(_absent))
     for rec in frame[present].to_dict('records'):
         fid = rec.get('fixture_id')
         pid = rec.get('player_id')
