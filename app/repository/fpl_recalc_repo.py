@@ -71,6 +71,15 @@ BUNDLE_COLS = [
     )
 ]
 
+# Columns in BUNDLE_COLS that are legitimately absent from the frame, so the
+# warning below stays a signal rather than noise people learn to scroll past.
+#
+# 'Gameweek' is stamped onto fpl_df AFTER the frame is built, so it is never in
+# scope here — and recalc does not need it: it re-derives the gameweek from the
+# fixture. Listing it beats deleting it from BUNDLE_COLS, which would lose the
+# record that recalc consumes it when it IS present.
+BUNDLE_COLS_EXPECTED_ABSENT = {'Gameweek'}
+
 SCORE_PRED_COLS = ['id', 'Home Team', 'Away Team', 'Home Goals', 'Away Goals',
                    'Home Clean Sheet %', 'Away Clean Sheet %']
 
@@ -119,7 +128,8 @@ async def save_assembly_bundles(frame, score_preds, team_predictions):
     #
     # So: still tolerant, but never silent. Naming the absentees turns "why is
     # this number wrong" into one line of the run log.
-    _absent = [c for c in BUNDLE_COLS if c not in frame.columns]
+    _absent = [c for c in BUNDLE_COLS
+               if c not in frame.columns and c not in BUNDLE_COLS_EXPECTED_ABSENT]
     if _absent:
         logger.warning(
             "[fpl_assembly_bundles] %d BUNDLE_COLS missing from the frame — "

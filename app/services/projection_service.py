@@ -2719,11 +2719,6 @@ class ProjectionService:
                             _f = stamp_xmin_columns(_f, profiles, confirmed_xi=confirmed_xi)
                             if _rates and _stamp_rate_columns is not None:
                                 _f = _stamp_rate_columns(_f, _rates)
-                                logger.info(f"[{league}] {label}: static rates stamped for "
-                                            f"{list(_rates)} -> present={[c for c in _rates if c in _f.columns]}")
-                            else:
-                                logger.warning(f"[{league}] {label}: static rates NOT stamped "
-                                               f"(_rates={bool(_rates)}, fn={_stamp_rate_columns is not None})")
                             if _m_bar_lookup:
                                 _f = apply_per90_scaling(_f, _m_bar_lookup)
                             if _pen_map and _apply_penalty_order_shares is not None:
