@@ -317,11 +317,45 @@ class EuroCompProjectionService:
                 subset=['competition_id', 'team_id'], keep='first'
             )
 
+        # Each club belongs to exactly ONE league here: the scope league it
+        # holds its most recent rating for.
+        #
+        # Without this a promoted or relegated club appears twice. Cardiff City
+        # carried a Championship rating (Attack 91.6, Overall -30.8) alongside
+        # the League One rating it won promotion with (Attack 136.3, Overall
+        # +46.6). make_round_goal_prediction looks a club up by NAME and takes
+        # .values[0], and this frame is sorted by Overall, so Cardiff were
+        # projected on their League One attack — 1.91 expected goals against a
+        # market saying 1.5, in a Championship-vs-Championship cup tie. George
+        # spotted it in the output: "seems like an incorrect projection".
+        #
+        # Barely bites the euro scope, whose 15 leagues are all top tiers in
+        # different countries, so a club rarely has two. Across four tiers of
+        # one pyramid it is routine — promotion and relegation guarantee it.
+        _scope_ids_by_name = {get_league_id(l, comps): l for l in scope.leagues}
+        _current_comp_by_team = {}
+        if isinstance(latest_ratings_by_id, pd.DataFrame) and not latest_ratings_by_id.empty:
+            _in_scope = latest_ratings_by_id[
+                latest_ratings_by_id['competition_id'].isin(_scope_ids_by_name.keys())
+            ].sort_values('Date', ascending=False).drop_duplicates(subset=['team_id'], keep='first')
+            _current_comp_by_team = dict(zip(_in_scope['team_id'], _in_scope['competition_id']))
+
         for league_name in scope.leagues:
             league_id = get_league_id(league_name, comps)
 
             if isinstance(latest_ratings_by_id, pd.DataFrame):
                 league_rows = latest_ratings_by_id[latest_ratings_by_id['competition_id'] == league_id]
+                # Drop clubs whose newest scope rating belongs to another
+                # league — they are carried here only by an older season.
+                if not league_rows.empty and _current_comp_by_team:
+                    _belongs = league_rows['team_id'].map(_current_comp_by_team) == league_id
+                    _stale = int((~_belongs).sum())
+                    if _stale:
+                        logger.info(
+                            f"[{league}] {league_name}: dropped {_stale} club(s) rated more "
+                            f"recently in another scope league"
+                        )
+                    league_rows = league_rows[_belongs]
             else:
                 league_rows = pd.DataFrame()
             if league_rows.empty:
@@ -468,29 +502,14 @@ class EuroCompProjectionService:
         # Placed after home_team/away_team are resolved from ids — the ratings
         # frame is keyed on team NAME.
         if scope.same_league_only:
-            # Which league each club actually plays in = the scope league it
-            # holds its MOST RECENT rating for.
-            #
-            # Not dict(zip(ratings['Team'], ratings['League'])): `ratings` is
-            # sorted by Overall before this point, so for a club with rows in
-            # two tiers that dict resolves last-wins by RATING, not by league.
-            # Southampton carries a stale Premier League rating from May plus a
-            # current Championship one; it resolved to Premier League while
-            # West Ham resolved to Championship, so a Championship-vs-
-            # Championship tie was silently dropped as cross-tier.
-            _scope_ids = {get_league_id(l, comps): l for l in scope.leagues}
-            _lr = latest_ratings_by_id
-            if isinstance(_lr, pd.DataFrame) and not _lr.empty:
-                _lr = _lr[_lr['competition_id'].isin(_scope_ids.keys())]
-                _lr = _lr.sort_values('Date', ascending=False).drop_duplicates(
-                    subset=['team_id'], keep='first'
-                )
-                _team_league = dict(zip(
-                    _lr['Team'].astype(str).str.strip(),
-                    _lr['competition_id'].map(_scope_ids),
-                ))
-            else:
-                _team_league = {}
+            # `ratings` now holds one row per club — its current league — so
+            # the frame is safe to map from. Do NOT rebuild this from
+            # ratings['League'] with dict(zip(...)): the frame is sorted by
+            # Overall, so a club with rows in two tiers would resolve
+            # last-wins by RATING rather than by league.
+            _team_league = dict(zip(
+                ratings['Team'].astype(str).str.strip(), ratings['League']
+            ))
             _pre = len(next_fix)
             _home_league = next_fix['home_team'].astype(str).str.strip().map(_team_league)
             _away_league = next_fix['away_team'].astype(str).str.strip().map(_team_league)
