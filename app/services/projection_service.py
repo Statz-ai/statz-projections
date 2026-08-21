@@ -2869,6 +2869,43 @@ class ProjectionService:
                 # Fantasy-only: keep just gameweeks still open to plan for.
                 fpl_df = ProjectionService._fantasy_gw_filter(fpl_df, _fantasy_upcoming_gws)
 
+                # Diagnostic: where do flagged players actually disappear?
+                # 92 players (i/s/u) reach production with zero rows, and the
+                # guard below has had status removed as a filter since
+                # 2026-08-03 — so the loss is somewhere else. Log the status
+                # breakdown either side of the guard rather than reasoning
+                # about it: the frame is the only place that can answer.
+                try:
+                    _dbg_conn = await get_source_connection()
+                    try:
+                        async with _dbg_conn.cursor() as _dc:
+                            await _dc.execute("""
+                                SELECT m.player_id, s.status
+                                FROM fpl_player_mappings m
+                                JOIN fpl_player_snapshots s ON s.fpl_id = m.fpl_id
+                                 AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM fpl_player_snapshots)
+                                WHERE m.player_id IS NOT NULL AND m.fpl_id IS NOT NULL
+                            """)
+                            _status_by_pid = {int(r[0]): r[1] for r in await _dc.fetchall()}
+                    finally:
+                        release_source_connection(_dbg_conn)
+
+                    def _status_counts(_df, _label):
+                        if _df is None or 'player_id' not in getattr(_df, 'columns', []):
+                            return
+                        _pids = set(_df['player_id'].dropna().astype(int))
+                        _c = {}
+                        for _p in _pids:
+                            _st = _status_by_pid.get(_p, '?')
+                            _c[_st] = _c.get(_st, 0) + 1
+                        logger.info(f"[{league}] [avail-debug] {_label}: "
+                                    + ", ".join(f"{k}={v}" for k, v in sorted(_c.items())))
+
+                    _status_counts(_fpl_base, "players in _fpl_base")
+                    _status_counts(fpl_df, "players in fpl_df (pre-guard)")
+                except Exception as _dbg_err:
+                    logger.warning(f"[{league}] avail-debug skipped: {_dbg_err}")
+
                 # FPL membership + availability guard (George, 2026-07-23).
                 # ALLOW-list: a player only gets FPL fantasy rows if he is
                 #   (1) IN the current FPL game — active mapping, fpl_id NOT
@@ -2902,6 +2939,54 @@ class ProjectionService:
                                   -- he projects at ~0 xMins and stays visible
                                   -- and dialable. Membership in the current
                                   -- bootstrap is handled by the loader gate.
+                                  --
+                                  -- DEPARTURES are the one exception, and they
+                                  -- are a MEMBERSHIP rule, not an availability
+                                  -- one (George, 2026-08-21: "someone like
+                                  -- Spence isn't even in the game"). A player
+                                  -- at Inter is not "unlikely to play" — he is
+                                  -- not in the competition, and zeroing his
+                                  -- minutes would mean computing a minutes
+                                  -- estimate for a fiction.
+                                  --
+                                  -- Status 'u' ALONE is not the signal: 'u'
+                                  -- can in principle mean personal leave or a
+                                  -- visa problem, which is ordinary
+                                  -- unavailability and belongs in rule 1. So
+                                  -- it must be corroborated by FPL's own
+                                  -- departure news, which is uniform across
+                                  -- all 38 today ("Has joined Internazionale
+                                  -- permanently"). A 'u' player without that
+                                  -- news falls through and gets projected at
+                                  -- ~0 like any injury.
+                                  --
+                                  -- Self-healing: status and news are read
+                                  -- fresh every run, so a January loan return
+                                  -- re-enters the pool on his own.
+                                  -- Three phrasings observed. The spec said
+                                  -- "Has joined ..." was uniform across all 38;
+                                  -- it covers 37. Uche reads "has returned to
+                                  -- Getafe CF" — a loan ending, which is just
+                                  -- as much a departure.
+                                  --
+                                  -- The training guard is why "returned" is
+                                  -- safe to match: "has returned to TRAINING"
+                                  -- is the opposite of a departure, and would
+                                  -- otherwise exclude a player who is coming
+                                  -- BACK. No news says that today; the guard is
+                                  -- for the day one does.
+                                  --
+                                  -- Single %, not %%: this query is executed
+                                  -- with no parameters, so aiomysql applies no
+                                  -- format substitution and %% would reach
+                                  -- MySQL literally.
+                                  AND NOT (
+                                      s.status = 'u'
+                                      AND (s.news LIKE 'Has joined%'
+                                           OR s.news LIKE 'Has left%'
+                                           OR s.news LIKE 'Has returned to%')
+                                      AND s.news NOT LIKE '%training%'
+                                  )
                             """)
                             _allowed = {int(r[0]) for r in await _cur.fetchall()}
                     finally:
@@ -2909,7 +2994,7 @@ class ProjectionService:
                     if _allowed and 'player_id' in fpl_df.columns:
                         _before = len(fpl_df)
                         fpl_df = fpl_df[fpl_df['player_id'].astype('Int64').isin(_allowed)]
-                        logger.info(f"[{league}] FPL membership guard: {_before - len(fpl_df)} rows dropped (not in current FPL game / red-flagged), {len(fpl_df)} kept")
+                        logger.info(f"[{league}] FPL membership guard: {_before - len(fpl_df)} rows dropped (not in the current FPL game, or departed the league), {len(fpl_df)} kept")
                     else:
                         # Never no-op silently — a missing column or empty allow
                         # set means ghosts (departed/loaned players) ship.
