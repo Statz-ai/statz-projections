@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
-from app.services.euro_comp_projection_service import EuroCompProjectionService
+from app.services.multi_league_projection_service import MultiLeagueProjectionService
 from app.services.international_projection_service import InternationalProjectionService
 from app.models.requests.league_request import LeagueRequest
 import warnings
@@ -68,7 +68,7 @@ class ProjectionAllTeams:
         _total_start = time.time()
         _league_times = {}
 
-        _euro_comp_service = EuroCompProjectionService()
+        _euro_comp_service = MultiLeagueProjectionService()
         _intl_service = InternationalProjectionService()
         _domestic_service = ProjectionService()
 
@@ -90,8 +90,8 @@ class ProjectionAllTeams:
             await touch_all_running()
             try:
                 # Delegate euro comps to dedicated service
-                if EuroCompProjectionService.handles(league):
-                    logger.info(f"[{league}] Delegating to EuroCompProjectionService")
+                if MultiLeagueProjectionService.handles(league):
+                    logger.info(f"[{league}] Delegating to MultiLeagueProjectionService")
                     _start_time = time.time()
                     request = LeagueRequest(league=league)
                     await _euro_comp_service.projections(request)

@@ -35,7 +35,7 @@ class RetrainRequest(BaseModel):
     promote: Optional[bool] = False
 
 from app.services.projection_service import ProjectionService
-from app.services.euro_comp_projection_service import EuroCompProjectionService
+from app.services.multi_league_projection_service import MultiLeagueProjectionService
 from app.services.international_projection_service import InternationalProjectionService
 from app.models.requests.league_request import LeagueRequest
 from app.services.projection_all_teams_service import ProjectionAllTeams
@@ -44,7 +44,7 @@ router = APIRouter(prefix="/api/projections", tags=["API"])
 logger = logging.getLogger("routes")
 
 projection_service = ProjectionService()
-euro_comp_service = EuroCompProjectionService()
+multi_league_service = MultiLeagueProjectionService()
 international_projection_service = InternationalProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 
@@ -157,8 +157,8 @@ async def _run_single_league(request):
     try:
         if InternationalProjectionService.is_international_comp(request.league):
             await international_projection_service.projections(request)
-        elif EuroCompProjectionService.handles(request.league):
-            await euro_comp_service.projections(request)
+        elif MultiLeagueProjectionService.handles(request.league):
+            await multi_league_service.projections(request)
         else:
             await projection_service.projections(request)
         finished_at = datetime.now(timezone.utc).isoformat()

@@ -80,7 +80,7 @@ XG_STAT_ID = 5304
 
 # odds_beta = bet365 goal-line blend weight (0 = pure model, 1 = pure bookie).
 # Bumped to 0.5 alongside the goals odds-blend cascade rewrite 2026-05-29 —
-# matches euro_comp_projection_service. boost=1.0 = no draw inflation
+# matches multi_league_projection_service. boost=1.0 = no draw inflation
 # (international games don't need the draw nudge that league football
 # gets per-comp via projection_config).
 ODDS_BETA = 0.5
@@ -328,7 +328,7 @@ class InternationalProjectionService:
     same pipeline. WC is one comp among several — friendlies, qualifiers,
     Euros etc. are added by registering scopes in INTL_SCOPES.
 
-    Stateless — instance method only for parity with EuroCompProjectionService.
+    Stateless — instance method only for parity with MultiLeagueProjectionService.
     """
 
     @staticmethod

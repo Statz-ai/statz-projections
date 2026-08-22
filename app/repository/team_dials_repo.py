@@ -17,7 +17,7 @@ indexed values drift naturally.
 ONE call site: projection_service._prepare_league(), which handles the
 domestic leagues.
 
-It used to also run inside euro_comp_projection_service, and this docstring
+It used to also run inside multi_league_projection_service, and this docstring
 went on claiming so for three months after it stopped being true. Euro comps
 have read the latest DOMESTIC team_ratings row since May 2026 rather than
 recomputing — and that row is already post-dial, so a dial still reaches

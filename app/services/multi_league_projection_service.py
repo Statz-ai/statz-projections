@@ -21,7 +21,7 @@ import os
 logger = logging.getLogger("projection")
 
 
-class EuroCompProjectionService:
+class MultiLeagueProjectionService:
     CURRENT_DIR = Path(__file__).resolve().parent
     APP_DIR = CURRENT_DIR.parent
 
@@ -30,7 +30,6 @@ class EuroCompProjectionService:
     SAVE_FILE_PATH = APP_DIR / "projection-outputs"
     DAYS = 5
 
-    EURO_COMPS = ['Champions League', 'Europa League', 'Conference League', 'Europa Conference League']
 
     # ── Multi-league scopes ───────────────────────────────────────────────
     #
@@ -129,7 +128,7 @@ class EuroCompProjectionService:
 
     @staticmethod
     def scope_for(league: str):
-        for scope in EuroCompProjectionService.SCOPES.values():
+        for scope in MultiLeagueProjectionService.SCOPES.values():
             if league in scope.comps:
                 return scope
         return None
@@ -151,14 +150,13 @@ class EuroCompProjectionService:
         raise FileNotFoundError(f"No data file found at {parquet_path} or {excel_path}")
 
     @staticmethod
-    def is_euro_comp(league: str) -> bool:
-        return league in EuroCompProjectionService.EURO_COMPS
-
-    @staticmethod
     def handles(league: str) -> bool:
-        """True for any competition this service projects — euro comps and
-        the domestic cups. Routing should ask this, not is_euro_comp."""
-        return EuroCompProjectionService.scope_for(league) is not None
+        """True for any competition this service projects.
+
+        The routing question. Replaced is_euro_comp, which stopped describing
+        what this service covers once the domestic cups joined it.
+        """
+        return MultiLeagueProjectionService.scope_for(league) is not None
 
     @staticmethod
     async def _resolve_upcoming_fixture_teams(comp_id: int, date_from, date_to):
@@ -201,14 +199,14 @@ class EuroCompProjectionService:
         # stops a cutoff pinned by a PREVIOUS run in the same process from
         # being reused — every entry point sets its own.
         _pinned = set_run_cutoff()
-        scope = EuroCompProjectionService.scope_for(league)
+        scope = MultiLeagueProjectionService.scope_for(league)
         if scope is None:
             raise ValueError(f"{league!r} is not a registered multi-league scope")
         logger.info(f'[{league}] START multi-league projections (history cutoff pinned {_pinned})')
 
-        data_folder_path = EuroCompProjectionService.DATA_FOLDER_PATH
-        model_file_path = EuroCompProjectionService.MODEL_FILE_PATH
-        save_file_path = EuroCompProjectionService.SAVE_FILE_PATH
+        data_folder_path = MultiLeagueProjectionService.DATA_FOLDER_PATH
+        model_file_path = MultiLeagueProjectionService.MODEL_FILE_PATH
+        save_file_path = MultiLeagueProjectionService.SAVE_FILE_PATH
 
         date_from = pd.to_datetime('today')
         date_to = date_from + pd.DateOffset(days=scope.days)
@@ -575,7 +573,7 @@ class EuroCompProjectionService:
         next_fix = next_fix.drop(drop_indices).reset_index(drop=True)
 
         if len(next_fix) == 0:
-            logger.info(f"[{league}] No fixtures to project"); logger.info(f"[{league}] DONE euro comp projections (nothing to do)")
+            logger.info(f"[{league}] No fixtures to project"); logger.info(f"[{league}] DONE multi-league projections (nothing to do)")
             return
 
         logger.info(f'[{league}] Projecting {len(next_fix)} fixtures...')
@@ -1110,4 +1108,4 @@ class EuroCompProjectionService:
         await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=comp_id, comp_teams=comp_teams)
 
         _elapsed = round(time.time() - _start_time, 1)
-        logger.info(f'[{league}] DONE euro comp projections in {_elapsed}s')
+        logger.info(f'[{league}] DONE multi-league projections in {_elapsed}s')
