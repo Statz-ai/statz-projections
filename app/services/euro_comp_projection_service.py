@@ -82,6 +82,21 @@ class EuroCompProjectionService:
         tier_ladder: tuple = ()
         tier_compression: tuple = ()
         guardrail_max: float = None
+        # stat_ladder: the same idea as tier_ladder but for TEAM STATS, and
+        # deliberately gentler — chained from the DAMPED promotion weights
+        # (1.24 / 1.14 / 1.10, what get_team_weighted_average actually applies)
+        # rather than the raw config values behind tier_ladder.
+        #
+        # Shots should separate less than goals: a division gap buys both more
+        # shots AND better conversion, and goals collect both while shots only
+        # collect the volume half. Two-division example — goals ratio 1.924,
+        # stats ratio 1.342.
+        #
+        # There is no market safety net here. Every cup tie is priced for
+        # GOALS, so the guardrail corrects us there, but across all five books
+        # not one Carabao tie carries a corners, cards or shots market
+        # (measured 2026-08-22). Whatever this produces is what publishes.
+        stat_ladder: tuple = ()
 
     # NOTE the cup scope is deliberately incomplete: with coefficient='flat'
     # and same_league_only=True it projects 6 of the 23 upcoming Carabao ties
@@ -108,6 +123,7 @@ class EuroCompProjectionService:
             tier_ladder=((8, 2.700), (9, 1.6875), (12, 1.250), (14, 1.000)),
             tier_compression=((1, 1.00), (2, 0.85), (3, 0.75)),
             guardrail_max=0.75,
+            stat_ladder=((8, 1.555), (9, 1.254), (12, 1.100), (14, 1.000)),
         ),
     }
 
@@ -759,7 +775,12 @@ class EuroCompProjectionService:
             inplace=True
         )
 
-        # Adjust team stats by UEFA coefficient difference
+        # Adjust team stats for the opposition's division.
+        _stat_ladder = {cid: v for cid, v in scope.stat_ladder}
+        _stat_comp = dict(scope.tier_compression)
+        _stat_rank = {cid: i for i, cid in enumerate(
+            sorted(_stat_ladder, key=lambda c: -_stat_ladder[c]))} if _stat_ladder else {}
+        _league_id_cache = {}
         for i in range(len(team_projections)):
             team = team_projections['Team'].iloc[i]
             team_league = ratings.loc[ratings['Team'] == team, 'League'].values
@@ -780,7 +801,38 @@ class EuroCompProjectionService:
                 continue
             opp_league = opp_league[0]
             opp_league_rating = ratings.loc[ratings['Team'] == opponent, 'coef'].values[0]
+            if _stat_ladder:
+                for _nm in (team_league, opp_league):
+                    if _nm not in _league_id_cache:
+                        _league_id_cache[_nm] = get_league_id(_nm, comps)
+                _t_id, _o_id = _league_id_cache[team_league], _league_id_cache[opp_league]
 
+            if _stat_ladder:
+                # Domestic cups: multiply by a tier RATIO, exactly as the
+                # scoreline does, rather than the euro form below.
+                #
+                # The euro form divides by (opponent_coef - team_coef + 1),
+                # which is only well-behaved while the two coefficients sit
+                # within 1.0 of each other. Our ladder spans 1.00 to 1.555, so
+                # it would survive — but the GOALS ladder spans 1.00 to 2.700,
+                # and a Premier League side against League Two would give a
+                # divisor of -0.70 and negative shot projections. A ratio is
+                # well-behaved at any spread, so use it here and don't leave
+                # that landmine for whoever widens the ladder next.
+                _n = abs(_stat_rank.get(_t_id, 0) - _stat_rank.get(_o_id, 0))
+                _sr = (_stat_ladder[_t_id] / _stat_ladder[_o_id]) ** _stat_comp.get(_n, 1.0) \
+                    if (_t_id in _stat_ladder and _o_id in _stat_ladder) else 1.0
+                for _col in ('Shots Total', 'Shots On Target', 'Corners',
+                             'Passes', 'Successful Passes', 'Total Crosses'):
+                    team_projections.at[team_projections.index[i], _col] = round(
+                        team_projections[_col].iloc[i] * _sr, 2)
+                # Fouls, cards, tackles, interceptions and offsides are left
+                # alone deliberately. They should move INVERSELY with the tier
+                # gap — the weaker side does the chasing — but there is no
+                # measured basis for the size, and no market on any cup tie to
+                # catch a wrong sign. Getting the direction wrong on tackles
+                # and cards would surface directly in player props.
+                continue
             diff = (opp_league_rating - league_rating)
             team_projections.at[team_projections.index[i], 'Shots Total'] = (team_projections['Shots Total'].iloc[i] / (diff + 1)).round(2)
             team_projections.at[team_projections.index[i], 'Shots On Target'] = (team_projections['Shots On Target'].iloc[i] / (diff + 1)).round(2)
