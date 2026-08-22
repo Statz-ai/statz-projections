@@ -860,15 +860,16 @@ class EuroCompProjectionService:
             team_stats['fixture_id'].isin(fixtures_df[fixtures_df['competition_id'] == comp_id]['id'])
         ]
         _comp_goals = _comp_goals[_comp_goals['stats_type_id'] == _goals_stat_id].copy()
+        # NO recency decay on either half of this ratio. The 0.9^(weeks-5)
+        # weighting used elsewhere suits a league playing weekly; a cup plays a
+        # handful of rounds a year, so it collapses the sample to the most
+        # recent round. Applying it here gave 1.236 goals/team against a true
+        # 1.494 and pushed shots-per-goal UP to 10.62 — worse than the bug it
+        # replaced. A conversion rate is stable over time and wants sample
+        # size, not recency.
         avg_goals = None
         if not _comp_goals.empty:
-            _comp_goals['Date'] = _comp_goals['fixture_id'].map(fixtures_df.set_index('id')['kickoff_datetime'])
-            _comp_goals['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(_comp_goals['Date'])).dt.days // 7
-            _comp_goals['Weight'] = 0.9 ** (_comp_goals['Weeks Since Kickoff'] - 5)
-            _comp_goals.loc[_comp_goals['Weeks Since Kickoff'] < 6, 'Weight'] = 1
-            _wsum = _comp_goals['Weight'].sum()
-            if _wsum:
-                avg_goals = (_comp_goals['Weight'] * _comp_goals['value']).sum() / _wsum
+            avg_goals = _comp_goals['value'].mean()
         if avg_goals is None or not np.isfinite(avg_goals) or avg_goals <= 0:
             avg_goals = (avg_home_goals + avg_away_goals) / 2
             logger.info(f"[{league}] shots-per-goal: no comp goals rows — falling back to the league baseline")
@@ -878,20 +879,11 @@ class EuroCompProjectionService:
         league_team_stats = team_stats[team_stats['fixture_id'].isin(fixtures_df[fixtures_df['competition_id'] == comp_id]['id'])]
 
         league_shots = league_team_stats[league_team_stats['stats_type_id'] == get_stat_id('Shots Total', stats_types)].copy()
-        league_shots['Date'] = league_shots['fixture_id'].map(fixtures_df.set_index('id')['kickoff_datetime'])
-        league_shots['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(league_shots['Date'])).dt.days // 7
-        league_shots['Weight'] = 0.9 ** (league_shots['Weeks Since Kickoff'] - 5)
-        league_shots.loc[league_shots['Weeks Since Kickoff'] < 6, 'Weight'] = 1
-        league_shots['Weighted Shots'] = league_shots['Weight'] * league_shots['value']
-        avg_shots = league_shots['Weighted Shots'].sum() / league_shots['Weight'].sum()
+        # Unweighted, to match avg_goals above — see the note there.
+        avg_shots = league_shots['value'].mean()
 
         league_shots_on_target = league_team_stats[league_team_stats['stats_type_id'] == get_stat_id('Shots On Target', stats_types)].copy()
-        league_shots_on_target['Date'] = league_shots_on_target['fixture_id'].map(fixtures_df.set_index('id')['kickoff_datetime'])
-        league_shots_on_target['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(league_shots_on_target['Date'])).dt.days // 7
-        league_shots_on_target['Weight'] = 0.9 ** (league_shots_on_target['Weeks Since Kickoff'] - 5)
-        league_shots_on_target.loc[league_shots_on_target['Weeks Since Kickoff'] < 6, 'Weight'] = 1
-        league_shots_on_target['Weighted Shots On Target'] = league_shots_on_target['Weight'] * league_shots_on_target['value']
-        avg_shots_on_target = league_shots_on_target['Weighted Shots On Target'].sum() / league_shots_on_target['Weight'].sum()
+        avg_shots_on_target = league_shots_on_target['value'].mean()
 
         avg_shots_per_goal = avg_shots / avg_goals
         avg_shots_on_target_per_goal = avg_shots_on_target / avg_goals
