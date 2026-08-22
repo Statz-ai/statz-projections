@@ -841,8 +841,39 @@ class EuroCompProjectionService:
             team_projections.at[team_projections.index[i], 'Successful Passes'] = (team_projections['Successful Passes'].iloc[i] / (diff + 1)).round(2)
             team_projections.at[team_projections.index[i], 'Total Crosses'] = (team_projections['Total Crosses'].iloc[i] / (diff + 1)).round(2)
 
-        # Bake goals into shots projections
-        avg_goals = (avg_home_goals + avg_away_goals) / 2
+        # Bake goals into shots projections.
+        #
+        # avg_goals MUST come from the same fixtures as avg_shots below.
+        # It used to be the pooled LEAGUE baseline while avg_shots was measured
+        # on this competition — so shots-per-goal was a ratio of two quantities
+        # from different populations, describing nothing real. On the Carabao
+        # Cup that gave 9.73 when no division sits above 9.55 and the cup's own
+        # rate is 8.44, inflating every shot projection through the pull below
+        # (Chelsea 24.4 shots, ~1.9 of it this).
+        #
+        # Measured exactly as shots are — same frame, same recency decay — so
+        # the two stay paired. Falls back to the league baseline for BOTH
+        # halves when a competition has no goals rows, because half-falling-
+        # back is what created the bug.
+        _goals_stat_id = get_stat_id('Goals', stats_types)
+        _comp_goals = team_stats[
+            team_stats['fixture_id'].isin(fixtures_df[fixtures_df['competition_id'] == comp_id]['id'])
+        ]
+        _comp_goals = _comp_goals[_comp_goals['stats_type_id'] == _goals_stat_id].copy()
+        avg_goals = None
+        if not _comp_goals.empty:
+            _comp_goals['Date'] = _comp_goals['fixture_id'].map(fixtures_df.set_index('id')['kickoff_datetime'])
+            _comp_goals['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(_comp_goals['Date'])).dt.days // 7
+            _comp_goals['Weight'] = 0.9 ** (_comp_goals['Weeks Since Kickoff'] - 5)
+            _comp_goals.loc[_comp_goals['Weeks Since Kickoff'] < 6, 'Weight'] = 1
+            _wsum = _comp_goals['Weight'].sum()
+            if _wsum:
+                avg_goals = (_comp_goals['Weight'] * _comp_goals['value']).sum() / _wsum
+        if avg_goals is None or not np.isfinite(avg_goals) or avg_goals <= 0:
+            avg_goals = (avg_home_goals + avg_away_goals) / 2
+            logger.info(f"[{league}] shots-per-goal: no comp goals rows — falling back to the league baseline")
+        else:
+            logger.info(f"[{league}] shots-per-goal: comp goals/team {avg_goals:.3f}")
 
         league_team_stats = team_stats[team_stats['fixture_id'].isin(fixtures_df[fixtures_df['competition_id'] == comp_id]['id'])]
 
