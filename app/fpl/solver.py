@@ -79,6 +79,21 @@ def best_xi(squad_idx, pos, xpts, eligible, horizon):
     return round(total, 1), per_gw_starts
 
 
+class NoFeasibleSolution(Exception):
+    """The constraints admit no legal squad.
+
+    An ANSWER, not a failure. A manager whose sell values cannot fund any legal
+    move genuinely has no plan, and the caller should say so rather than report
+    that something broke.
+
+    Both solvers used to raise a bare RuntimeError here, and the endpoints
+    caught every exception alike, so Laravel showed "Projections are updating,
+    try again in a few minutes" — advice that can never work for an infeasible
+    squad. The three failures on 2026-08-21 landed at 18:40, 18:47 and 18:49:
+    almost certainly one person being told to retry the impossible.
+    """
+
+
 def solve_build(players, horizon, from_gw, season_id, budget=BUDGET, scope='preseason'):
     """players: [{id,name,pos,club,price,xpts[H],eligible}]. Returns the draft dict."""
     P = len(players)
@@ -133,7 +148,13 @@ def solve_build(players, horizon, from_gw, season_id, budget=BUDGET, scope='pres
                integrality=np.ones(N), bounds=Bounds(np.zeros(N), ub_v),
                options={'time_limit': 300, 'mip_rel_gap': 0.0})
     if res.x is None:
-        raise RuntimeError(f"no solution (status {res.status})")
+        # Same split as solve_transfer: status 2 is "no legal squad exists",
+        # which is an answer. A build with an impossible budget is the most
+        # likely way a user reaches it.
+        shape = f"gw={from_gw} budget={budget} pool={len(players)} horizon={horizon}"
+        if res.status == 2:
+            raise NoFeasibleSolution(f"no legal squad within the constraints ({shape})")
+        raise RuntimeError(f"solver failed (status {res.status}: {res.message}) ({shape})")
     x = res.x
 
     squad_idx = [p for p in range(P) if x[xi(p)] > 0.5]
@@ -228,7 +249,18 @@ def solve_transfer(data):
                integrality=np.ones(N), bounds=Bounds(np.zeros(N), ub_v),
                options={'time_limit': 300, 'mip_rel_gap': 0.0})
     if res.x is None:
-        raise RuntimeError(f"no solution (status {res.status})")
+        # scipy.optimize.milp status 2 = INFEASIBLE: the solver ran fine and
+        # concluded no legal squad exists. Anything else (1 iteration limit,
+        # 3 unbounded, 4 numerical) really is a failure.
+        #
+        # The inputs are in the message because the old version logged a bare
+        # status code, and by the time anyone looked the logs had rotated with
+        # no way to tell WHICH squad could not be solved.
+        shape = (f"gw={from_gw} bank={bank} ft={ft} budget={budget:.1f} "
+                 f"owned={sum(owned)} pool={P} horizon={H}")
+        if res.status == 2:
+            raise NoFeasibleSolution(f"no legal squad within the constraints ({shape})")
+        raise RuntimeError(f"solver failed (status {res.status}: {res.message}) ({shape})")
     x = res.x
 
     new_squad = {p for p in range(P) if x[p] > 0.5}

@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.fpl.solver import solve_transfer, solve_build
+from app.fpl.solver import solve_transfer, solve_build, NoFeasibleSolution
 
 logger = logging.getLogger("fpl")
 router = APIRouter(prefix="/api/fpl", tags=["FPL"])
@@ -48,6 +48,18 @@ async def solve_transfer_endpoint(request: TransferRequest):
     try:
         plan = solve_transfer(data)
         return {"status": "ok", "plan": plan}
+    except NoFeasibleSolution as e:
+        # An ANSWER, not a failure: the constraints admit no legal squad.
+        # Logged at WARNING with the inputs, never as an exception — a
+        # traceback here says "we broke" and sends whoever reads the health
+        # digest looking for a bug that is not there.
+        #
+        # Returned as its own status so the caller can say "no legal plan"
+        # instead of "try again in a few minutes", which for an infeasible
+        # squad is advice that can never work. Three failures nine minutes
+        # apart on 2026-08-21 look exactly like someone taking that advice.
+        logger.warning("solve-transfer infeasible: %s", e)
+        return {"status": "infeasible", "message": str(e)}
     except Exception as e:
         logger.exception("solve-transfer failed")
         return {"status": "error", "message": str(e)}
@@ -62,6 +74,18 @@ async def solve_build_endpoint(request: BuildRequest):
             request.season_id, budget=request.budget, scope=request.scope,
         )
         return {"status": "ok", "draft": draft}
+    except NoFeasibleSolution as e:
+        # An ANSWER, not a failure: the constraints admit no legal squad.
+        # Logged at WARNING with the inputs, never as an exception — a
+        # traceback here says "we broke" and sends whoever reads the health
+        # digest looking for a bug that is not there.
+        #
+        # Returned as its own status so the caller can say "no legal plan"
+        # instead of "try again in a few minutes", which for an infeasible
+        # squad is advice that can never work. Three failures nine minutes
+        # apart on 2026-08-21 look exactly like someone taking that advice.
+        logger.warning("solve-build infeasible: %s", e)
+        return {"status": "infeasible", "message": str(e)}
     except Exception as e:
         logger.exception("solve-build failed")
         return {"status": "error", "message": str(e)}
