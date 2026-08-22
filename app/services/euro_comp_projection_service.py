@@ -68,6 +68,20 @@ class EuroCompProjectionService:
         coefficient: str = 'uefa'
         same_league_only: bool = False
         days: int = 5
+        # --- domestic-cup tier model (agreed with George 2026-08-21) ---
+        # tier_ladder: relative difficulty per competition_id, chained from the
+        #   promotion/relegation steps George maintains — 1.25 (L1->L2),
+        #   1.35 (Ch->L1), 1.60 (PL->Ch). Only ratios matter; the pin is
+        #   arbitrary.
+        # tier_compression: exponent applied to the ratio, keyed by how many
+        #   divisions apart. 1 division is untouched (1.00) so the steps stay
+        #   exactly as tuned; wider gaps are pulled in, because a single match
+        #   is 11 v 11 and the favourite rests players — the gap can only be so
+        #   big on the day. Set D: 1.00 / 0.85 / 0.75.
+        # guardrail_max: ceiling on the odds blend for this scope.
+        tier_ladder: tuple = ()
+        tier_compression: tuple = ()
+        guardrail_max: float = None
 
     # NOTE the cup scope is deliberately incomplete: with coefficient='flat'
     # and same_league_only=True it projects 6 of the 23 upcoming Carabao ties
@@ -89,8 +103,11 @@ class EuroCompProjectionService:
             leagues=('Premier League', 'Championship', 'League One', 'League Two'),
             goal_avg_league_ids=(8, 9, 12, 14),
             coefficient='flat',
-            same_league_only=True,
+            same_league_only=False,
             days=21,
+            tier_ladder=((8, 2.700), (9, 1.6875), (12, 1.250), (14, 1.000)),
+            tier_compression=((1, 1.00), (2, 0.85), (3, 0.75)),
+            guardrail_max=0.75,
         ),
     }
 
@@ -501,34 +518,35 @@ class EuroCompProjectionService:
         #
         # Placed after home_team/away_team are resolved from ids — the ratings
         # frame is keyed on team NAME.
-        if scope.same_league_only:
-            # `ratings` now holds one row per club — its current league — so
-            # the frame is safe to map from. Do NOT rebuild this from
-            # ratings['League'] with dict(zip(...)): the frame is sorted by
-            # Overall, so a club with rows in two tiers would resolve
+        if scope.tier_ladder:
+            # Stamp each club's division so the baseline and the tier ratio can
+            # both be taken per fixture below.
+            #
+            # `ratings` holds one row per club — its CURRENT league — so the
+            # frame is safe to map from. Do NOT rebuild this with a plain
+            # dict(zip(...)) on an unsorted frame: `ratings` is sorted by
+            # Overall, and a club with rows in two divisions would then resolve
             # last-wins by RATING rather than by league.
             _team_league = dict(zip(
                 ratings['Team'].astype(str).str.strip(), ratings['League']
             ))
             _pre = len(next_fix)
-            _home_league = next_fix['home_team'].astype(str).str.strip().map(_team_league)
-            _away_league = next_fix['away_team'].astype(str).str.strip().map(_team_league)
-            _keep = _home_league.notna() & _away_league.notna() & (_home_league == _away_league)
+            _hl = next_fix['home_team'].astype(str).str.strip().map(_team_league)
+            _al = next_fix['away_team'].astype(str).str.strip().map(_team_league)
+            _keep = _hl.notna() & _al.notna()
             next_fix = next_fix[_keep].copy()
-            # Both clubs share this league — stamped so the goal baseline can
-            # be taken per league rather than pooled (see below).
-            next_fix['_scope_league'] = _home_league[_keep]
-            # League-major ordering so the per-league score_preds concat below
-            # stays aligned with next_fix, which downstream code indexes into
-            # positionally. Cosmetic reordering, cup scope only.
-            next_fix = next_fix.sort_values(
-                by=['_scope_league', 'kickoff_datetime', 'home_team']
-            ).reset_index(drop=True)
+            next_fix['_home_league'] = _hl[_keep]
+            next_fix['_away_league'] = _al[_keep]
             if _pre - len(next_fix):
-                logger.info(
-                    f'[{league}] same-league only: kept {len(next_fix)} of {_pre} ties, '
-                    f'dropped {_pre - len(next_fix)} cross-tier or unrated'
-                )
+                # Unrated clubs are dropped, never guessed at. This is what
+                # keeps the FA Cup honest — its qualifying rounds are non-league
+                # sides we hold nothing for (1 of 273 rated, 2026-08-21).
+                logger.info(f'[{league}] dropped {_pre - len(next_fix)} tie(s) with an unrated club')
+            # Pair-major ordering so the per-pair score_preds concat below stays
+            # aligned with next_fix, which downstream code indexes positionally.
+            next_fix = next_fix.sort_values(
+                by=['_home_league', '_away_league', 'kickoff_datetime', 'home_team']
+            ).reset_index(drop=True)
 
         # Drop fixtures where teams don't have ratings
         drop_indices = []
@@ -562,28 +580,48 @@ class EuroCompProjectionService:
         avg_away_goals = np.mean(avg_away_goals_list) if avg_away_goals_list else 1.2
         logger.info(f"[{league}] Goal averages: avg_home={avg_home_goals:.3f} avg_away={avg_away_goals:.3f} (from {len(avg_home_goals_list)} top-5 leagues)")
 
-        if scope.same_league_only and '_scope_league' in next_fix.columns and not next_fix.empty:
-            # Both clubs in each tie share a division, so the correct Poisson
-            # baseline is that division's own rate — no estimation needed.
-            # It matters: measured over 3 years, the Premier League runs 2.99
-            # goals a game while the Championship, League One and League Two
-            # all sit at 2.53-2.60. Pooling the four would push League Two
-            # ties up by roughly 0.4 goals.
+        if scope.tier_ladder and '_home_league' in next_fix.columns and not next_fix.empty:
+            # Per-fixture baseline and tier ratio, grouped by the pair of
+            # divisions involved so both are constant within a group.
             #
-            # groupby iterates keys in sorted order and next_fix is sorted on
-            # the same key above, so the concat lands in next_fix's order —
-            # which downstream code relies on, indexing the two positionally.
+            # BASELINE — the merge George settled on: average the two clubs'
+            # own league averages. It matters that this is per-pair: measured
+            # over 3 years the Premier League runs 2.99 goals a game against
+            # 2.53-2.60 for the three EFL divisions, so pooling all four would
+            # push a League Two tie up by roughly 0.4 goals.
+            #
+            # TIER RATIO — R = ladder[home] / ladder[away], then raised to an
+            # exponent set by how many divisions apart the clubs are. Folded
+            # into the baseline rather than applied to the ratings, so no club
+            # is ever converted into another division's terms: converting
+            # produced a 242 defence for Plymouth and made the answer depend on
+            # which direction you converted in.
+            _ladder = dict(scope.tier_ladder)
+            _compress = dict(scope.tier_compression)
+            _rank = {cid: i for i, cid in enumerate(
+                sorted(_ladder, key=lambda c: -_ladder[c]))}
             _parts = []
-            for _lg, _grp in next_fix.groupby('_scope_league', sort=True):
-                _lid = get_league_id(_lg, comps)
-                _h = get_home_goal_avg(_lid, team_stats, fixtures_df, stats_types, standings, seasons)
-                _a = get_away_goal_avg(_lid, team_stats, fixtures_df, stats_types, standings, seasons)
-                if _h is None or np.isnan(_h):
-                    _h = avg_home_goals
-                if _a is None or np.isnan(_a):
-                    _a = avg_away_goals
-                logger.info(f"[{league}] {_lg}: {len(_grp)} tie(s), baseline home={_h:.3f} away={_a:.3f}")
-                _parts.append(make_round_goal_prediction(_grp, ratings, _h, _a))
+            for (_hl, _al), _grp in next_fix.groupby(['_home_league', '_away_league'], sort=True):
+                _hid, _aid = get_league_id(_hl, comps), get_league_id(_al, comps)
+                _bh = get_home_goal_avg(_hid, team_stats, fixtures_df, stats_types, standings, seasons)
+                _ba = get_away_goal_avg(_hid, team_stats, fixtures_df, stats_types, standings, seasons)
+                _bh2 = get_home_goal_avg(_aid, team_stats, fixtures_df, stats_types, standings, seasons)
+                _ba2 = get_away_goal_avg(_aid, team_stats, fixtures_df, stats_types, standings, seasons)
+                _vals = [v for v in (_bh, _bh2) if v is not None and not np.isnan(v)]
+                _home_base = float(np.mean(_vals)) if _vals else avg_home_goals
+                _vals = [v for v in (_ba, _ba2) if v is not None and not np.isnan(v)]
+                _away_base = float(np.mean(_vals)) if _vals else avg_away_goals
+
+                _R = 1.0
+                if _hid in _ladder and _aid in _ladder:
+                    _steps = abs(_rank[_hid] - _rank[_aid])
+                    _R = (_ladder[_hid] / _ladder[_aid]) ** _compress.get(_steps, 1.0)
+                logger.info(
+                    f"[{league}] {_hl} v {_al}: {len(_grp)} tie(s), "
+                    f"baseline {_home_base:.3f}/{_away_base:.3f}, tier ratio {_R:.3f}"
+                )
+                _parts.append(make_round_goal_prediction(
+                    _grp, ratings, _home_base * _R, _away_base / _R))
             score_preds = pd.concat(_parts, ignore_index=True)
         else:
             score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
@@ -647,6 +685,15 @@ class EuroCompProjectionService:
                     goals_odds_map.get(fixture_id, {}),
                     odds_weight,
                     boost,
+                    # Domestic cups take the per-side distance-weighted
+                    # guardrail rather than a flat weight, because our cup
+                    # errors are concentrated rather than uniform: 9 of 17
+                    # cross-tier ties landed within 0.25 goals of the book
+                    # while Chelsea v Luton was out by 1.2. A flat weight
+                    # would drag the nine we had right in order to help the
+                    # one we didn't. Euro comps keep the flat weight.
+                    guardrail=bool(scope.guardrail_max),
+                    guardrail_max=scope.guardrail_max,
                 )
             )
             score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)

@@ -461,14 +461,24 @@ GUARDRAIL_MAX = float(os.getenv("ODDS_GUARDRAIL_MAX", "0.60"))
 GUARDRAIL_FLOOR = float(os.getenv("ODDS_GUARDRAIL_FLOOR", "1.0"))
 
 
-def guardrail_weight(lambda_model: float, lambda_bookie: float) -> float:
-    """Per-side blend weight from relative distance to the book's λ."""
+def guardrail_weight(lambda_model: float, lambda_bookie: float,
+                     max_weight: float = None) -> float:
+    """Per-side blend weight from relative distance to the book's λ.
+
+    `max_weight` overrides GUARDRAIL_MAX for callers that should defer more.
+    Domestic leagues use the default 0.60. Domestic CUPS pass 0.75 (George,
+    2026-08-21): a cup tie carries a blind spot league football doesn't —
+    rotation. A club that can afford to rest players in an easy tie does, and
+    nothing in a team rating can see it, so where the book disagrees strongly
+    it is more likely to be right than it would be in a league fixture.
+    """
     denom = max(float(lambda_bookie), GUARDRAIL_FLOOR)
     if denom <= 0:
         return 0.0
     gap = abs(float(lambda_model) - float(lambda_bookie)) / denom
     g2 = gap * gap
-    return GUARDRAIL_MAX * g2 / (g2 + GUARDRAIL_K * GUARDRAIL_K)
+    _max = GUARDRAIL_MAX if max_weight is None else float(max_weight)
+    return _max * g2 / (g2 + GUARDRAIL_K * GUARDRAIL_K)
 
 
 def blend_lambdas(
@@ -919,6 +929,7 @@ def compute_final_goals_and_probs(
     boost: float,
     rho: float = 0.0,
     guardrail: bool = False,
+    guardrail_max: float = None,
 ) -> Tuple[float, float, float, float, float]:
     """Single entry point for the goal-blend logic across all 3 services.
 
@@ -972,8 +983,8 @@ def compute_final_goals_and_probs(
             # the home team right and the away team badly wrong moves only
             # the away number. blend_lambdas takes a single w, so call it
             # once per side and keep the side that call is responsible for.
-            w_h = guardrail_weight(lambda_h_model, lh_b)
-            w_a = guardrail_weight(lambda_a_model, la_b)
+            w_h = guardrail_weight(lambda_h_model, lh_b, guardrail_max)
+            w_a = guardrail_weight(lambda_a_model, la_b, guardrail_max)
             new_h, _ = blend_lambdas(
                 lambda_h_model, lambda_a_model, lh_b, la_b, w_h,
             )
